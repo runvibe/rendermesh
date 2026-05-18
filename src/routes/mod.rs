@@ -1,4 +1,4 @@
-use axum::Router;
+use axum::{http::StatusCode, routing::any, Extension, Router};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use utoipa::OpenApi;
@@ -37,15 +37,23 @@ pub fn create_router(state: AppState, config: &AppConfig) -> Router {
         api_router
     };
 
-    let api_router = api_router
-        .layer(cors::build_cors_layer(&config.cors, None))
-        .layer(RequestBodyLimitLayer::new(config.body_limit_bytes));
+    let api_router = api_router.layer(cors::build_cors_layer(&config.cors, None));
 
     let router = if config.mcp.enabled {
         api_router.merge(mcp::router(&config.mcp))
     } else {
-        api_router
+        api_router.route(&config.mcp.path, any(disabled_mcp_endpoint))
     };
 
-    router.fallback(render::render).with_state(state)
+    router
+        .fallback(render::render)
+        .layer(RequestBodyLimitLayer::new(config.body_limit_bytes))
+        .layer(Extension(render::RenderRouteConfig {
+            body_limit_bytes: config.body_limit_bytes,
+        }))
+        .with_state(state)
+}
+
+async fn disabled_mcp_endpoint() -> StatusCode {
+    StatusCode::NOT_FOUND
 }

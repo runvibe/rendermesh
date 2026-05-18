@@ -1,40 +1,50 @@
 use axum::{
     body::{to_bytes, Body},
-    extract::{OriginalUri, State},
-    http::{header, HeaderName, HeaderValue, Request, StatusCode},
+    extract::{Extension, OriginalUri, State},
+    http::{header, HeaderName, HeaderValue, Method, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
 
 use crate::{
     dto::render::{RenderRequest, RenderResponse},
     state::AppState,
 };
 
+#[derive(Clone, Debug)]
+pub struct RenderRouteConfig {
+    pub body_limit_bytes: usize,
+}
+
 pub async fn render(
     State(state): State<AppState>,
+    Extension(config): Extension<RenderRouteConfig>,
     OriginalUri(uri): OriginalUri,
     request: Request<Body>,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    let body = match to_bytes(body, usize::MAX).await {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::warn!("failed to read render request body: {error}");
-            return StatusCode::BAD_REQUEST.into_response();
-        }
-    };
-
-    let Some(host) = parts
+    let host = parts
         .headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-    else {
-        return StatusCode::NOT_FOUND.into_response();
+        .unwrap_or_default()
+        .to_string();
+
+    let body = if matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        match to_bytes(body, config.body_limit_bytes).await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!("failed to read render request body: {error}");
+                return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+            }
+        }
+    } else {
+        Bytes::new()
     };
 
     let request = RenderRequest {
         method: parts.method,
-        host: host.to_string(),
+        host,
         path: uri.path().to_string(),
         query: uri.query().map(ToString::to_string),
         scheme: "https".to_string(),

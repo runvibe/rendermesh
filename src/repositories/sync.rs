@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -57,30 +58,151 @@ impl MirrorSyncService {
         S: RemoteStorage,
     {
         let origin_dir = LocalMirrorRepository::new(self.root.clone()).origin_dir(origin_id)?;
-        tokio::fs::create_dir_all(&origin_dir)
-            .await
-            .with_context(|| format!("create origin mirror {}", origin_dir.display()))?;
+        let staging_dir = self.staging_dir(origin_id)?;
+        prepare_staging_dir(&origin_dir, &staging_dir).await?;
 
-        let summaries = storage.list_objects().await?;
-        let mut remote_keys = BTreeSet::new();
-        let mut downloaded = 0usize;
-
-        for summary in summaries {
-            let normalized_key = normalize_remote_key(&summary.key)?;
-            remote_keys.insert(normalized_key.clone());
-
-            if local_object_matches_summary(&origin_dir, &normalized_key, &summary).await? {
-                continue;
+        let result = sync_origin_dir(&staging_dir, storage).await;
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                remove_dir_if_exists(&staging_dir).await?;
+                return Err(error);
             }
+        };
 
-            let object = storage.get_object(&summary.key).await?;
-            write_object(&origin_dir, object).await?;
-            downloaded += 1;
+        if let Err(error) = swap_origin_dir(&origin_dir, &staging_dir).await {
+            remove_dir_if_exists(&staging_dir).await?;
+            return Err(error);
         }
 
-        remove_deleted_objects(&origin_dir, &remote_keys).await?;
-        remove_orphan_metadata_sidecars(&origin_dir, &remote_keys).await?;
-        Ok(SyncReport { downloaded })
+        Ok(report)
+    }
+
+    fn staging_dir(&self, origin_id: &str) -> Result<PathBuf> {
+        LocalMirrorRepository::new(self.root.clone()).origin_dir(origin_id)?;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Ok(self
+            .root
+            .join(".rendermesh-sync")
+            .join(format!("{origin_id}-{}-{timestamp}", std::process::id())))
+    }
+}
+
+async fn sync_origin_dir<S>(origin_dir: &Path, storage: &S) -> Result<SyncReport>
+where
+    S: RemoteStorage,
+{
+    tokio::fs::create_dir_all(origin_dir)
+        .await
+        .with_context(|| format!("create origin mirror {}", origin_dir.display()))?;
+
+    let summaries = storage.list_objects().await?;
+    let mut remote_keys = BTreeSet::new();
+    let mut downloaded = 0usize;
+
+    for summary in summaries {
+        let normalized_key = normalize_remote_key(&summary.key)?;
+        remote_keys.insert(normalized_key.clone());
+
+        if local_object_matches_summary(origin_dir, &normalized_key, &summary).await? {
+            continue;
+        }
+
+        let object = storage.get_object(&summary.key).await?;
+        write_object(origin_dir, object).await?;
+        downloaded += 1;
+    }
+
+    remove_deleted_objects(origin_dir, &remote_keys).await?;
+    remove_orphan_metadata_sidecars(origin_dir, &remote_keys).await?;
+    Ok(SyncReport { downloaded })
+}
+
+async fn prepare_staging_dir(origin_dir: &Path, staging_dir: &Path) -> Result<()> {
+    remove_dir_if_exists(staging_dir).await?;
+    if tokio::fs::metadata(origin_dir).await.is_ok() {
+        copy_dir_contents(origin_dir, staging_dir).await
+    } else {
+        tokio::fs::create_dir_all(staging_dir)
+            .await
+            .with_context(|| format!("create staging mirror {}", staging_dir.display()))
+    }
+}
+
+async fn copy_dir_contents(from: &Path, to: &Path) -> Result<()> {
+    tokio::fs::create_dir_all(to)
+        .await
+        .with_context(|| format!("create staging mirror {}", to.display()))?;
+
+    let mut stack = vec![(from.to_path_buf(), to.to_path_buf())];
+    while let Some((source_dir, target_dir)) = stack.pop() {
+        let mut entries = tokio::fs::read_dir(&source_dir)
+            .await
+            .with_context(|| format!("read mirror dir {}", source_dir.display()))?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let file_type = entry.file_type().await?;
+            let target_path = target_dir.join(entry.file_name());
+
+            if file_type.is_dir() {
+                tokio::fs::create_dir_all(&target_path)
+                    .await
+                    .with_context(|| format!("create staging dir {}", target_path.display()))?;
+                stack.push((entry.path(), target_path));
+            } else if file_type.is_file() {
+                tokio::fs::copy(entry.path(), &target_path)
+                    .await
+                    .with_context(|| format!("copy staging file {}", target_path.display()))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn swap_origin_dir(origin_dir: &Path, staging_dir: &Path) -> Result<()> {
+    if let Some(parent) = origin_dir.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create mirror root {}", parent.display()))?;
+    }
+
+    let backup_dir = origin_dir.with_extension(format!(
+        "rendermesh-backup-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+
+    let had_origin = tokio::fs::metadata(origin_dir).await.is_ok();
+    if had_origin {
+        tokio::fs::rename(origin_dir, &backup_dir)
+            .await
+            .with_context(|| format!("move old mirror to {}", backup_dir.display()))?;
+    }
+
+    if let Err(error) = tokio::fs::rename(staging_dir, origin_dir).await {
+        if had_origin {
+            tokio::fs::rename(&backup_dir, origin_dir)
+                .await
+                .with_context(|| format!("restore old mirror {}", origin_dir.display()))?;
+        }
+        return Err(error).with_context(|| format!("activate mirror {}", origin_dir.display()));
+    }
+
+    remove_dir_if_exists(&backup_dir).await?;
+    Ok(())
+}
+
+async fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    match tokio::fs::remove_dir_all(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove dir {}", path.display())),
     }
 }
 
@@ -627,5 +749,100 @@ mod tests {
 
         assert!(error.to_string().contains("invalid object path"));
         assert!(!temp.path().join("origins/secret.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_sync_keeps_previous_mirror_untouched() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let origin_dir = root.join("web");
+        tokio::fs::create_dir_all(&origin_dir).await.expect("mkdir");
+        tokio::fs::write(origin_dir.join("index.html"), "old")
+            .await
+            .expect("write old index");
+        tokio::fs::write(origin_dir.join("keep.html"), "keep")
+            .await
+            .expect("write old keep");
+
+        let storage = FailingStorage {
+            fail_key: "keep.html".to_string(),
+            objects: BTreeMap::from([
+                (
+                    "index.html".to_string(),
+                    RemoteObject {
+                        key: "index.html".to_string(),
+                        body: Bytes::from_static(b"new"),
+                        etag: Some("new-index".to_string()),
+                        last_modified: None,
+                        content_type: Some("text/html".to_string()),
+                        cache_control: None,
+                    },
+                ),
+                (
+                    "keep.html".to_string(),
+                    RemoteObject {
+                        key: "keep.html".to_string(),
+                        body: Bytes::from_static(b"new keep"),
+                        etag: Some("new-keep".to_string()),
+                        last_modified: None,
+                        content_type: Some("text/html".to_string()),
+                        cache_control: None,
+                    },
+                ),
+            ]),
+        };
+
+        let error = MirrorSyncService::new(root)
+            .sync_origin("web", &storage)
+            .await
+            .expect_err("sync fails");
+
+        assert!(error.to_string().contains("forced failure"));
+        assert_eq!(
+            tokio::fs::read_to_string(origin_dir.join("index.html"))
+                .await
+                .expect("read old index"),
+            "old"
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(origin_dir.join("keep.html"))
+                .await
+                .expect("read old keep"),
+            "keep"
+        );
+    }
+
+    struct FailingStorage {
+        fail_key: String,
+        objects: BTreeMap<String, RemoteObject>,
+    }
+
+    #[async_trait]
+    impl RemoteStorage for FailingStorage {
+        async fn list_objects(&self) -> anyhow::Result<Vec<RemoteObjectSummary>> {
+            Ok(self
+                .objects
+                .values()
+                .map(|object| RemoteObjectSummary {
+                    key: object.key.clone(),
+                    etag: object.etag.clone(),
+                    last_modified: object.last_modified.clone(),
+                    size: object.body.len() as u64,
+                    content_type: object.content_type.clone(),
+                    cache_control: object.cache_control.clone(),
+                })
+                .collect())
+        }
+
+        async fn get_object(&self, key: &str) -> anyhow::Result<RemoteObject> {
+            if key == self.fail_key {
+                anyhow::bail!("forced failure for {key}");
+            }
+
+            self.objects
+                .get(key)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("missing {key}"))
+        }
     }
 }

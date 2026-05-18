@@ -93,7 +93,7 @@ fn setup_render_router(temp_root: &Path) -> Router {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 0,
         cors: CorsConfig::Permissive,
-        body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
+        body_limit_bytes: 16,
         otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
         mcp: McpConfig {
@@ -333,6 +333,52 @@ async fn render_route_rejects_unknown_host() {
     assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
     let body = response_bytes(response).await;
     assert!(body.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn render_route_rejects_missing_host_as_misdirected_request() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn render_route_applies_body_limit_to_fallback() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let object_dir = temp.path().join("origins/web/assets");
+    tokio::fs::create_dir_all(&object_dir).await.expect("mkdir");
+    tokio::fs::write(object_dir.join("hello.txt"), "hello from mirror")
+        .await
+        .expect("write object");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/assets/hello.txt")
+                .header("host", "app.test")
+                .body(Body::from("this body is too large"))
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 fn mcp_request(method: &str, id: i64, params: Value) -> Request<Body> {
