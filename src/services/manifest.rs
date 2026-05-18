@@ -1,6 +1,16 @@
+use std::{path::Path, sync::Arc};
+
 use anyhow::{anyhow, Result};
 
-use crate::dto::manifest::RenderMeshManifest;
+use crate::{dto::manifest::RenderMeshManifest, repositories::manifest::ManifestRepository};
+
+pub async fn load_manifest(
+    repository: &ManifestRepository,
+    path: impl AsRef<Path>,
+) -> Result<Arc<RenderMeshManifest>> {
+    let content = repository.load_content(path).await?;
+    Ok(Arc::new(parse_manifest_yaml(&content)?))
+}
 
 pub fn parse_manifest_yaml(input: &str) -> Result<RenderMeshManifest> {
     let manifest = serde_yaml::from_str::<RenderMeshManifest>(input)?;
