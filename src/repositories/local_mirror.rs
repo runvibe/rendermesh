@@ -1,9 +1,10 @@
-use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+
+pub const METADATA_DIR_NAME: &str = ".rendermesh-meta";
 
 #[derive(Clone)]
 pub struct LocalMirrorRepository {
@@ -55,11 +56,13 @@ impl LocalMirrorRepository {
         origin_id: &str,
         object_path: &str,
     ) -> Result<Option<LocalObject>> {
-        let path = self.object_path(origin_id, object_path)?;
+        let origin_dir = self.origin_dir(origin_id)?;
+        let normalized = normalize_object_path(object_path)?;
+        let path = self.object_path(origin_id, &normalized)?;
 
         match tokio::fs::read(&path).await {
             Ok(body) => {
-                let metadata = self.read_metadata(&path).await?;
+                let metadata = self.read_metadata(&origin_dir, &normalized).await?;
                 Ok(Some(LocalObject {
                     body: Bytes::from(body),
                     metadata,
@@ -72,8 +75,8 @@ impl LocalMirrorRepository {
         }
     }
 
-    async fn read_metadata(&self, object_path: &Path) -> Result<ObjectMetadata> {
-        let metadata_path = metadata_sidecar_path(object_path);
+    async fn read_metadata(&self, origin_dir: &Path, object_key: &str) -> Result<ObjectMetadata> {
+        let metadata_path = metadata_sidecar_path(origin_dir, object_key)?;
 
         match tokio::fs::read_to_string(&metadata_path).await {
             Ok(content) => serde_json::from_str(&content).with_context(|| {
@@ -108,7 +111,18 @@ pub fn normalize_object_path(path: &str) -> Result<String> {
         return Err(anyhow!("invalid object path {path}"));
     }
 
+    if is_reserved_metadata_key(normalized) {
+        return Err(anyhow!("invalid object path {path}"));
+    }
+
     Ok(normalized.to_string())
+}
+
+pub fn metadata_sidecar_path(origin_dir: &Path, object_key: &str) -> Result<PathBuf> {
+    let normalized = normalize_object_path(object_key)?;
+    Ok(origin_dir
+        .join(METADATA_DIR_NAME)
+        .join(format!("{}.json", encode_metadata_key(&normalized))))
 }
 
 fn validate_origin_id(origin_id: &str) -> Result<()> {
@@ -122,10 +136,27 @@ fn validate_origin_id(origin_id: &str) -> Result<()> {
         .ok_or_else(|| anyhow!("invalid origin id {origin_id}"))
 }
 
-fn metadata_sidecar_path(object_path: &Path) -> PathBuf {
-    let mut sidecar = OsString::from(object_path.as_os_str());
-    sidecar.push(".meta.json");
-    PathBuf::from(sidecar)
+fn is_reserved_metadata_key(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .next()
+        .and_then(|component| match component {
+            Component::Normal(part) => part.to_str(),
+            _ => None,
+        })
+        == Some(METADATA_DIR_NAME)
+}
+
+fn encode_metadata_key(key: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(key.len() * 2);
+
+    for byte in key.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+
+    encoded
 }
 
 #[cfg(test)]
@@ -144,8 +175,13 @@ mod tests {
         tokio::fs::write(origin_dir.join("docs/index.html"), "<h1>Docs</h1>")
             .await
             .expect("write object");
+        let metadata_path =
+            metadata_sidecar_path(&origin_dir, "docs/index.html").expect("metadata path");
+        tokio::fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
+            .await
+            .expect("mkdir metadata");
         tokio::fs::write(
-            origin_dir.join("docs/index.html.meta.json"),
+            metadata_path,
             r#"{"content_type":"text/html","etag":"abc","last_modified":"Mon, 01 Jan 2024 00:00:00 GMT","cache_control":"max-age=60"}"#,
         )
         .await
@@ -168,6 +204,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_object_ending_meta_json_with_separate_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let repository = LocalMirrorRepository::new(root.clone());
+        let origin_dir = repository.origin_dir("web").expect("origin dir");
+        tokio::fs::create_dir_all(&origin_dir).await.expect("mkdir");
+        tokio::fs::write(origin_dir.join("foo.meta.json"), "real object")
+            .await
+            .expect("write object");
+        let metadata_path =
+            metadata_sidecar_path(&origin_dir, "foo.meta.json").expect("metadata path");
+        tokio::fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
+            .await
+            .expect("mkdir metadata");
+        tokio::fs::write(
+            metadata_path,
+            r#"{"content_type":"application/json","etag":"meta-object"}"#,
+        )
+        .await
+        .expect("write metadata");
+
+        let object = repository
+            .read_object("web", "/foo.meta.json")
+            .await
+            .expect("read")
+            .expect("object");
+
+        assert_eq!(object.body, bytes::Bytes::from_static(b"real object"));
+        assert_eq!(
+            object.metadata.content_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(object.metadata.etag.as_deref(), Some("meta-object"));
+    }
+
+    #[tokio::test]
     async fn returns_none_for_missing_object() {
         let temp = tempfile::tempdir().expect("tempdir");
         let repository = LocalMirrorRepository::new(temp.path().join("origins"));
@@ -187,5 +259,8 @@ mod tests {
         assert!(repository.origin_dir("../bad").is_err());
         assert!(repository.object_path("web", "../secret").is_err());
         assert!(repository.object_path("web", "/../secret").is_err());
+        assert!(repository
+            .object_path("web", ".rendermesh-meta/foo")
+            .is_err());
     }
 }

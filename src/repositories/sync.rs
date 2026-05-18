@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     path::{Component, Path, PathBuf},
 };
 
@@ -8,7 +7,9 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::repositories::local_mirror::{LocalMirrorRepository, ObjectMetadata};
+use crate::repositories::local_mirror::{
+    metadata_sidecar_path, LocalMirrorRepository, ObjectMetadata, METADATA_DIR_NAME,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteObjectSummary {
@@ -102,7 +103,7 @@ async fn local_object_matches_summary(
         return Ok(false);
     }
 
-    let metadata = read_sidecar_metadata(&object_path).await?;
+    let metadata = read_sidecar_metadata(origin_dir, key).await?;
     Ok(optional_field_matches(&metadata.etag, &summary.etag)
         && optional_field_matches(&metadata.last_modified, &summary.last_modified)
         && optional_field_matches(&metadata.content_type, &summary.content_type)
@@ -136,7 +137,12 @@ async fn write_object(origin_dir: &Path, object: RemoteObject) -> Result<()> {
         last_modified: object.last_modified,
         cache_control: object.cache_control,
     };
-    let sidecar_path = metadata_sidecar_path(&object_path);
+    let sidecar_path = metadata_sidecar_path(origin_dir, &key)?;
+    if let Some(parent) = sidecar_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("create metadata parent {}", parent.display()))?;
+    }
     tokio::fs::write(&sidecar_path, serde_json::to_vec(&metadata)?)
         .await
         .with_context(|| format!("write local object metadata {}", sidecar_path.display()))?;
@@ -161,11 +167,14 @@ async fn remove_deleted_objects(origin_dir: &Path, remote_keys: &BTreeSet<String
             let file_type = entry.file_type().await?;
 
             if file_type.is_dir() {
+                if path == origin_dir.join(METADATA_DIR_NAME) {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }
 
-            if !file_type.is_file() || is_metadata_sidecar(&path) {
+            if !file_type.is_file() {
                 continue;
             }
 
@@ -178,7 +187,7 @@ async fn remove_deleted_objects(origin_dir: &Path, remote_keys: &BTreeSet<String
                 .await
                 .with_context(|| format!("remove deleted local object {}", path.display()))?;
 
-            let sidecar_path = metadata_sidecar_path(&path);
+            let sidecar_path = metadata_sidecar_path(origin_dir, &key)?;
             match tokio::fs::remove_file(&sidecar_path).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -197,8 +206,8 @@ async fn remove_deleted_objects(origin_dir: &Path, remote_keys: &BTreeSet<String
     Ok(())
 }
 
-async fn read_sidecar_metadata(object_path: &Path) -> Result<ObjectMetadata> {
-    let sidecar_path = metadata_sidecar_path(object_path);
+async fn read_sidecar_metadata(origin_dir: &Path, key: &str) -> Result<ObjectMetadata> {
+    let sidecar_path = metadata_sidecar_path(origin_dir, key)?;
 
     match tokio::fs::read_to_string(&sidecar_path).await {
         Ok(content) => serde_json::from_str(&content)
@@ -237,19 +246,14 @@ fn normalize_remote_key(key: &str) -> Result<String> {
         return Err(anyhow!("invalid object path {key}"));
     }
 
+    if key.starts_with(METADATA_DIR_NAME)
+        && (key.len() == METADATA_DIR_NAME.len()
+            || key.as_bytes().get(METADATA_DIR_NAME.len()) == Some(&b'/'))
+    {
+        return Err(anyhow!("invalid object path {key}"));
+    }
+
     Ok(key.to_string())
-}
-
-fn metadata_sidecar_path(object_path: &Path) -> PathBuf {
-    let mut sidecar = OsString::from(object_path.as_os_str());
-    sidecar.push(".meta.json");
-    PathBuf::from(sidecar)
-}
-
-fn is_metadata_sidecar(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".meta.json"))
 }
 
 fn relative_key(origin_dir: &Path, object_path: &Path) -> Result<String> {
@@ -344,10 +348,9 @@ mod tests {
                 .expect("read"),
             "<h1>Hello</h1>"
         );
-        assert!(temp
-            .path()
-            .join("origins/web/index.html.meta.json")
-            .exists());
+        let metadata_path = metadata_sidecar_path(&temp.path().join("origins/web"), "index.html")
+            .expect("metadata path");
+        assert!(metadata_path.exists());
     }
 
     #[tokio::test]
@@ -361,7 +364,12 @@ mod tests {
         tokio::fs::write(origin_dir.join("stale.html"), "old")
             .await
             .expect("write stale");
-        tokio::fs::write(origin_dir.join("stale.html.meta.json"), "{}")
+        let stale_metadata_path =
+            metadata_sidecar_path(&origin_dir, "stale.html").expect("stale metadata path");
+        tokio::fs::create_dir_all(stale_metadata_path.parent().expect("metadata parent"))
+            .await
+            .expect("mkdir metadata");
+        tokio::fs::write(&stale_metadata_path, "{}")
             .await
             .expect("write stale metadata");
         tokio::fs::write(origin_dir.join("assets/keep.css"), "body{}")
@@ -387,8 +395,37 @@ mod tests {
             .expect("sync succeeds");
 
         assert!(!origin_dir.join("stale.html").exists());
-        assert!(!origin_dir.join("stale.html.meta.json").exists());
+        assert!(!stale_metadata_path.exists());
         assert!(origin_dir.join("assets/keep.css").exists());
+    }
+
+    #[tokio::test]
+    async fn removes_stale_real_object_ending_meta_json_and_its_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let origin_dir = root.join("web");
+        tokio::fs::create_dir_all(&origin_dir).await.expect("mkdir");
+        tokio::fs::write(origin_dir.join("foo.meta.json"), "real object")
+            .await
+            .expect("write stale object");
+        let metadata_path =
+            metadata_sidecar_path(&origin_dir, "foo.meta.json").expect("metadata path");
+        tokio::fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
+            .await
+            .expect("mkdir metadata");
+        tokio::fs::write(&metadata_path, r#"{"etag":"stale"}"#)
+            .await
+            .expect("write stale metadata");
+
+        let storage = FakeStorage::default();
+
+        MirrorSyncService::new(root)
+            .sync_origin("web", &storage)
+            .await
+            .expect("sync succeeds");
+
+        assert!(!origin_dir.join("foo.meta.json").exists());
+        assert!(!metadata_path.exists());
     }
 
     #[tokio::test]
@@ -400,8 +437,13 @@ mod tests {
         tokio::fs::write(origin_dir.join("index.html"), "<h1>Hello</h1>")
             .await
             .expect("write object");
+        let metadata_path =
+            metadata_sidecar_path(&origin_dir, "index.html").expect("metadata path");
+        tokio::fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
+            .await
+            .expect("mkdir metadata");
         tokio::fs::write(
-            origin_dir.join("index.html.meta.json"),
+            metadata_path,
             r#"{"content_type":"text/html","etag":"abc","last_modified":"Mon, 01 Jan 2024 00:00:00 GMT","cache_control":"max-age=60","size":14}"#,
         )
         .await

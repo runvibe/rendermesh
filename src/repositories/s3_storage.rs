@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, Client};
@@ -17,15 +17,30 @@ pub struct S3StorageRepository {
 
 impl S3StorageRepository {
     pub async fn from_origin_config(origin: &OriginConfig) -> Result<Self> {
-        let endpoint = std::env::var(&origin.endpoint_env)?;
-        let region = std::env::var(&origin.region_env)?;
-        let access_key_id = std::env::var(&origin.access_key_id_env)?;
-        let secret_access_key = std::env::var(&origin.secret_access_key_env)?;
+        let endpoint = std::env::var(&origin.endpoint_env)
+            .with_context(|| format!("read S3 endpoint env {}", origin.endpoint_env))?;
+        let region = std::env::var(&origin.region_env)
+            .with_context(|| format!("read S3 region env {}", origin.region_env))?;
+        let access_key_id = std::env::var(&origin.access_key_id_env)
+            .with_context(|| format!("read S3 access key id env {}", origin.access_key_id_env))?;
+        let secret_access_key =
+            std::env::var(&origin.secret_access_key_env).with_context(|| {
+                format!(
+                    "read S3 secret access key env {}",
+                    origin.secret_access_key_env
+                )
+            })?;
         let force_path_style = origin
             .force_path_style_env
             .as_ref()
-            .and_then(|key| std::env::var(key).ok())
-            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .map(|key| {
+                std::env::var(key)
+                    .ok()
+                    .map(|value| parse_force_path_style_env(key, &value))
+                    .transpose()
+            })
+            .transpose()?
+            .flatten()
             .unwrap_or(false);
 
         let credentials =
@@ -41,6 +56,34 @@ impl S3StorageRepository {
             client: Client::from_conf(config),
             bucket: origin.bucket.clone(),
         })
+    }
+}
+
+fn parse_force_path_style_env(key: &str, value: &str) -> Result<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("invalid {key} value {value:?} for S3 force_path_style"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_force_path_style_env_values() {
+        for value in ["1", "true", "TRUE", "yes", "On"] {
+            assert!(parse_force_path_style_env("S3_FORCE_PATH_STYLE", value).expect("parse true"));
+        }
+
+        for value in ["0", "false", "FALSE", "no", "Off"] {
+            assert!(!parse_force_path_style_env("S3_FORCE_PATH_STYLE", value).expect("parse false"));
+        }
+
+        let error =
+            parse_force_path_style_env("S3_FORCE_PATH_STYLE", "maybe").expect_err("invalid value");
+        assert!(error.to_string().contains("S3_FORCE_PATH_STYLE"));
     }
 }
 
@@ -73,7 +116,12 @@ impl RemoteStorage for S3StorageRepository {
             }
 
             if response.is_truncated().unwrap_or(false) {
-                continuation_token = response.next_continuation_token().map(ToString::to_string);
+                continuation_token = Some(
+                    response
+                        .next_continuation_token()
+                        .context("S3 list_objects_v2 response was truncated without next_continuation_token")?
+                        .to_string(),
+                );
             } else {
                 break;
             }
