@@ -62,6 +62,19 @@ pub struct EdgeHookConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct EdgeHookRequest {
+    pub context: EdgeHookContext,
+    pub request: EdgeHookHttpRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct EdgeHookContext {
+    pub bucket: String,
+    pub ip: Option<String>,
+    pub origin: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct EdgeHookHttpRequest {
     pub url: String,
     pub method: String,
     pub headers: BTreeMap<String, String>,

@@ -33,6 +33,7 @@ pub async fn render(
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
+    let client_ip = client_ip_from_headers(&parts.headers);
     let path = uri.path().to_string();
     let has_query = uri.query().is_some();
     let span = tracing::info_span!(
@@ -89,6 +90,7 @@ pub async fn render(
             path,
             query: uri.query().map(ToString::to_string),
             scheme: "https".to_string(),
+            client_ip,
             headers: parts.headers,
             body,
         };
@@ -111,6 +113,24 @@ pub async fn render(
     }
     .instrument(span)
     .await
+}
+
+fn client_ip_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+        })
 }
 
 fn render_response(response: RenderResponse) -> Response {

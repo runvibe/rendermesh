@@ -7,7 +7,7 @@ use tracing::Instrument;
 
 use crate::{
     dto::{
-        edge::{EdgeConfig, EdgeHookRequest},
+        edge::{EdgeConfig, EdgeHookContext, EdgeHookHttpRequest, EdgeHookRequest},
         render::{RenderRequest, RenderResponse},
     },
     libs::observability::elapsed_ms,
@@ -33,6 +33,7 @@ pub struct RenderGatewayService {
     edge_configs: EdgeConfigStore,
     template_store: TemplateStore,
     edge_http: EdgeHttpRepository,
+    origin_buckets: Arc<BTreeMap<String, String>>,
 }
 
 type EdgeChainResult = (Option<RenderResponse>, BTreeMap<String, String>);
@@ -60,6 +61,24 @@ impl RenderGatewayService {
         edge_configs: EdgeConfigStore,
         template_store: TemplateStore,
     ) -> Self {
+        Self::new_with_stores_and_origin_buckets(
+            resolver,
+            cors,
+            mirror,
+            edge_configs,
+            template_store,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn new_with_stores_and_origin_buckets(
+        resolver: HostResolver,
+        cors: CorsPolicy,
+        mirror: LocalMirrorRepository,
+        edge_configs: EdgeConfigStore,
+        template_store: TemplateStore,
+        origin_buckets: BTreeMap<String, String>,
+    ) -> Self {
         Self {
             resolver: Arc::new(resolver),
             cors: Arc::new(cors),
@@ -67,6 +86,7 @@ impl RenderGatewayService {
             edge_configs,
             template_store,
             edge_http: EdgeHttpRepository::new(),
+            origin_buckets: Arc::new(origin_buckets),
         }
     }
 
@@ -108,6 +128,13 @@ impl RenderGatewayService {
             EdgeConfigStore::from_configs(edge_configs),
             template_store,
         )
+    }
+
+    fn bucket_for_origin(&self, origin_id: &str) -> String {
+        self.origin_buckets
+            .get(origin_id)
+            .cloned()
+            .unwrap_or_else(|| origin_id.to_string())
     }
 
     #[tracing::instrument(
@@ -271,7 +298,8 @@ impl RenderGatewayService {
         async move {
             let mut state = EdgeChainState::default();
             for hook in &config.edges {
-                let edge_request = edge_hook_request(request);
+                let edge_request =
+                    edge_hook_request(request, resolved, &self.bucket_for_origin(&resolved.origin_id));
                 let edge_span = tracing::info_span!(
                     "rendermesh.edge_hook",
                     edge = %hook.name,
@@ -685,12 +713,23 @@ impl RenderGatewayService {
     }
 }
 
-fn edge_hook_request(request: &RenderRequest) -> EdgeHookRequest {
+fn edge_hook_request(
+    request: &RenderRequest,
+    resolved: &ResolvedHost,
+    bucket: &str,
+) -> EdgeHookRequest {
     EdgeHookRequest {
-        url: full_request_url(request),
-        method: request.method.as_str().to_string(),
-        headers: request_headers_map(request),
-        body: String::new(),
+        context: EdgeHookContext {
+            bucket: bucket.to_string(),
+            ip: request.client_ip.clone(),
+            origin: resolved.origin_id.clone(),
+        },
+        request: EdgeHookHttpRequest {
+            url: full_request_url(request),
+            method: request.method.as_str().to_string(),
+            headers: request_headers_map(request),
+            body: String::new(),
+        },
     }
 }
 

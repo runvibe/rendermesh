@@ -10,6 +10,7 @@ pub struct RenderRequest {
     pub path: String,
     pub query: Option<String>,
     pub scheme: String,
+    pub client_ip: Option<String>,
     pub headers: HeaderMap,
     pub body: Bytes,
 }

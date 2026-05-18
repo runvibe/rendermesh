@@ -46,13 +46,22 @@ pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewaySe
         storage_by_origin,
     );
 
-    Ok(RenderGatewayService::new_with_stores(
+    Ok(RenderGatewayService::new_with_stores_and_origin_buckets(
         HostResolver::new(&manifest)?,
         CorsPolicy::from_manifest(&manifest),
         mirror,
         edge_configs,
         template_store,
+        origin_buckets(&manifest),
     ))
+}
+
+fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
+    manifest
+        .origins
+        .iter()
+        .map(|(origin_id, origin)| (origin_id.clone(), origin.bucket.clone()))
+        .collect()
 }
 
 pub(crate) async fn load_edge_configs<I>(

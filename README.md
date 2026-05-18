@@ -97,10 +97,17 @@ Edge hooks are global per origin and run before static file delivery. RenderMesh
 
 ```json
 {
-  "url": "https://myapp.com/path?query=1",
-  "method": "GET",
-  "headers": {},
-  "body": ""
+  "context": {
+    "bucket": "bucket_my_app_123",
+    "ip": "203.0.113.10",
+    "origin": "my_app"
+  },
+  "request": {
+    "url": "https://myapp.com/path?query=1",
+    "method": "GET",
+    "headers": {},
+    "body": ""
+  }
 }
 ```
 

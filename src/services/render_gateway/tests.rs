@@ -3,7 +3,7 @@ use crate::repositories::local_mirror::{metadata_sidecar_path, LocalMirrorReposi
 use crate::services::cors::CorsPolicy;
 use crate::services::edge_config::{default_edge_config, parse_edge_config_yaml};
 use crate::services::edge_config_store::EdgeConfigStore;
-use crate::services::manifest::{parse_manifest_yaml, HostResolver};
+use crate::services::manifest::{parse_manifest_yaml, HostResolver, ResolvedHost};
 use crate::services::template_store::TemplateStore;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use wiremock::{
@@ -290,12 +290,23 @@ async fn edge_body_outcome_returns_edge_body_status_and_headers() {
 async fn edge_hook_request_body_is_empty_for_mvp() {
     let request = RenderRequest {
         body: bytes::Bytes::from_static(b"ignored"),
+        client_ip: Some("203.0.113.10".to_string()),
         ..test_request(Method::GET, "/")
     };
+    let resolved = ResolvedHost {
+        normalized_host: "web.test".to_string(),
+        matched_host: "web.test".to_string(),
+        origin_id: "web".to_string(),
+    };
 
-    let edge_request = edge_hook_request(&request);
+    let edge_request = edge_hook_request(&request, &resolved, "web-bucket");
 
-    assert_eq!(edge_request.body, "");
+    assert_eq!(edge_request.context.origin, "web");
+    assert_eq!(edge_request.context.bucket, "web-bucket");
+    assert_eq!(edge_request.context.ip.as_deref(), Some("203.0.113.10"));
+    assert_eq!(edge_request.request.url, "https://web.test/");
+    assert_eq!(edge_request.request.method, "GET");
+    assert_eq!(edge_request.request.body, "");
 }
 
 #[tokio::test]
@@ -509,6 +520,7 @@ fn test_request(method: Method, path: &str) -> RenderRequest {
         path: path.to_string(),
         query: None,
         scheme: "https".to_string(),
+        client_ip: None,
         headers: HeaderMap::new(),
         body: bytes::Bytes::new(),
     }

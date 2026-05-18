@@ -37,8 +37,10 @@ impl EdgeHttpRepository {
         tracing::info!(
             edge_url = %url,
             timeout_ms,
-            method = %request.method,
-            request_url = %request.url,
+            method = %request.request.method,
+            request_url = %request.request.url,
+            origin = %request.context.origin,
+            bucket = %request.context.bucket,
             "edge_http_request_start"
         );
         let response = self
@@ -83,10 +85,10 @@ impl Default for EdgeHttpRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dto::edge::EdgeHookRequest;
+    use crate::dto::edge::{EdgeHookContext, EdgeHookHttpRequest, EdgeHookRequest};
     use std::collections::BTreeMap;
     use wiremock::{
-        matchers::{method, path},
+        matchers::{body_json, method, path},
         Mock, MockServer, ResponseTemplate,
     };
 
@@ -95,6 +97,19 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/edge"))
+            .and(body_json(serde_json::json!({
+                "context": {
+                    "bucket": "app-bucket",
+                    "ip": "203.0.113.10",
+                    "origin": "app"
+                },
+                "request": {
+                    "url": "https://app.test/",
+                    "method": "GET",
+                    "headers": {},
+                    "body": ""
+                }
+            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "body": "ok",
                 "headers": {"x-edge": "yes"}
@@ -108,10 +123,17 @@ mod tests {
                 &format!("{}/edge", server.uri()),
                 500,
                 &EdgeHookRequest {
-                    url: "https://app.test/".to_string(),
-                    method: "GET".to_string(),
-                    headers: BTreeMap::new(),
-                    body: String::new(),
+                    context: EdgeHookContext {
+                        bucket: "app-bucket".to_string(),
+                        ip: Some("203.0.113.10".to_string()),
+                        origin: "app".to_string(),
+                    },
+                    request: EdgeHookHttpRequest {
+                        url: "https://app.test/".to_string(),
+                        method: "GET".to_string(),
+                        headers: BTreeMap::new(),
+                        body: String::new(),
+                    },
                 },
             )
             .await

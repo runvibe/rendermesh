@@ -16,7 +16,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  const path = new URL(payload.url).pathname;
+  const path = new URL(payload.request.url).pathname;
 
   if (path === "/direct") {
     sendJson(response, 202, {
