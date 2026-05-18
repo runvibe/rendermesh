@@ -19,10 +19,14 @@ impl CorsPolicy {
 
         for (host, host_config) in &manifest.hosts {
             let normalized = host.trim().to_ascii_lowercase();
-            let rule = if let Some(suffix) = normalized.strip_prefix("*.") {
-                CorsHostRule::WildcardSuffix(format!(".{suffix}"))
+            let Some(rule) = (if let Some(suffix) = normalized.strip_prefix("*.") {
+                normalize_host(suffix)
+                    .filter(|host| host == suffix)
+                    .map(|suffix| CorsHostRule::WildcardSuffix(format!(".{suffix}")))
             } else {
-                CorsHostRule::Exact(normalized)
+                normalize_host(&normalized).map(CorsHostRule::Exact)
+            }) else {
+                continue;
             };
 
             rules_by_origin
@@ -35,12 +39,7 @@ impl CorsPolicy {
     }
 
     pub fn allowed_origin_for(&self, origin_id: &str, request_origin: &str) -> Option<String> {
-        let parsed = url::Url::parse(request_origin).ok()?;
-        if parsed.scheme() != "https" {
-            return None;
-        }
-
-        let host = normalize_host(parsed.host_str()?)?;
+        let host = parse_https_origin_host(request_origin)?;
         let rules = self.rules_by_origin.get(origin_id)?;
 
         for rule in rules {
@@ -61,14 +60,29 @@ impl CorsPolicy {
     }
 }
 
+fn parse_https_origin_host(request_origin: &str) -> Option<String> {
+    let parsed = url::Url::parse(request_origin).ok()?;
+    if parsed.scheme() != "https"
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || !matches!(parsed.port(), None | Some(443))
+    {
+        return None;
+    }
+
+    normalize_host(parsed.host_str()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::services::manifest::parse_manifest_yaml;
 
-    #[test]
-    fn allows_exact_host_origin() {
-        let manifest = parse_manifest_yaml(
+    fn exact_host_manifest() -> crate::dto::manifest::RenderMeshManifest {
+        parse_manifest_yaml(
             r#"
 version: 1
 runtime:
@@ -87,9 +101,12 @@ hosts:
     origin: web
 "#,
         )
-        .expect("manifest parses");
+        .expect("manifest parses")
+    }
 
-        let policy = CorsPolicy::from_manifest(&manifest);
+    #[test]
+    fn allows_exact_host_origin() {
+        let policy = CorsPolicy::from_manifest(&exact_host_manifest());
 
         assert_eq!(
             policy.allowed_origin_for("web", "https://megaloja.com.br"),
@@ -98,8 +115,71 @@ hosts:
     }
 
     #[test]
+    fn allows_exact_host_origin_with_uppercase_host() {
+        let policy = CorsPolicy::from_manifest(&exact_host_manifest());
+
+        assert_eq!(
+            policy.allowed_origin_for("web", "https://MEGALOJA.com.br"),
+            Some("https://MEGALOJA.com.br".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_http_origin() {
+        let policy = CorsPolicy::from_manifest(&exact_host_manifest());
+
+        assert_eq!(
+            policy.allowed_origin_for("web", "http://megaloja.com.br"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_non_default_port() {
+        let policy = CorsPolicy::from_manifest(&exact_host_manifest());
+
+        assert_eq!(
+            policy.allowed_origin_for("web", "https://megaloja.com.br:444"),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_origin_with_path_query_fragment_or_userinfo() {
+        let policy = CorsPolicy::from_manifest(&exact_host_manifest());
+
+        for request_origin in [
+            "https://megaloja.com.br/path",
+            "https://megaloja.com.br?debug=true",
+            "https://megaloja.com.br#section",
+            "https://user@megaloja.com.br",
+            "https://user:password@megaloja.com.br",
+        ] {
+            assert_eq!(
+                policy.allowed_origin_for("web", request_origin),
+                None,
+                "{request_origin} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn reflects_matching_wildcard_origin() {
-        let manifest = parse_manifest_yaml(
+        let manifest = wildcard_host_manifest();
+        let policy = CorsPolicy::from_manifest(&manifest);
+
+        assert_eq!(
+            policy.allowed_origin_for("web", "https://admin.megaloja.com.br"),
+            Some("https://admin.megaloja.com.br".to_string())
+        );
+        assert_eq!(
+            policy.allowed_origin_for("web", "https://megaloja.com.br"),
+            None
+        );
+    }
+
+    fn wildcard_host_manifest() -> crate::dto::manifest::RenderMeshManifest {
+        parse_manifest_yaml(
             r#"
 version: 1
 runtime:
@@ -118,17 +198,6 @@ hosts:
     origin: web
 "#,
         )
-        .expect("manifest parses");
-
-        let policy = CorsPolicy::from_manifest(&manifest);
-
-        assert_eq!(
-            policy.allowed_origin_for("web", "https://admin.megaloja.com.br"),
-            Some("https://admin.megaloja.com.br".to_string())
-        );
-        assert_eq!(
-            policy.allowed_origin_for("web", "https://megaloja.com.br"),
-            None
-        );
+        .expect("manifest parses")
     }
 }
