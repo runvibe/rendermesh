@@ -1,8 +1,6 @@
 use axum::{Extension, Router};
 use axum_tracing_opentelemetry::middleware::{OtelAxumLayer, OtelInResponseLayer};
 use tower_http::limit::RequestBodyLimitLayer;
-use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{config::AppConfig, state::AppState};
 
@@ -10,23 +8,8 @@ mod cors;
 pub mod render;
 pub mod system;
 
-#[derive(OpenApi)]
-#[openapi(
-    info(
-        title = env!("CARGO_PKG_NAME"),
-        description = "Starter API with health and echo features.",
-        version = env!("CARGO_PKG_VERSION"),
-        license(name = "Apache-2.0", url = "https://www.apache.org/licenses/LICENSE-2.0.html")
-    )
-)]
-struct ApiDoc;
-
 pub fn create_router(state: AppState, config: &AppConfig) -> Router {
-    let (api_router, api) = utoipa_axum::router::OpenApiRouter::with_openapi(ApiDoc::openapi())
-        .merge(system::router())
-        .split_for_parts();
-
-    let api_router = api_router.merge(SwaggerUi::new("/docs").url("/openapi.json", api));
+    let api_router = Router::new().merge(system::router());
 
     let api_router = if config.otel_enabled {
         api_router

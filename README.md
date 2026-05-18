@@ -2,7 +2,7 @@
 
 RenderMesh is a Rust edge gateway for serving frontend applications from S3/R2-compatible buckets. It maps incoming hosts to origins, mirrors each configured bucket to local disk, derives CORS from the host map, applies per-origin edge rules, calls programmable HTTP edge hooks, and serves static assets from the local mirror.
 
-The current MVP keeps health, echo, docs, and OpenTelemetry support, then adds the RenderMesh fallback renderer for application traffic.
+The current MVP keeps health, echo, and OpenTelemetry support, then adds the RenderMesh fallback renderer for application traffic.
 
 ## Getting Started
 
@@ -21,7 +21,7 @@ The current MVP keeps health, echo, docs, and OpenTelemetry support, then adds t
 4. Run:
    - `cargo run`
 
-Swagger UI remains available at `/docs`.
+The service does not expose generated OpenAPI or Swagger UI routes.
 
 ### Local bucket lab
 

@@ -3,10 +3,10 @@ use std::collections::BTreeMap;
 use axum::{
     extract::OriginalUri,
     http::{HeaderMap, Method},
-    Json,
+    routing::get,
+    Json, Router,
 };
 use base64::{engine::general_purpose, Engine as _};
-use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     dto::echo::{EchoRequestInput, EchoResponse},
@@ -14,23 +14,19 @@ use crate::{
     state::AppState,
 };
 
-pub fn router() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(
-        get_echo,
-        post_echo,
-        put_echo,
-        patch_echo,
-        delete_echo,
-        head_echo,
-        options_echo
-    ))
+pub fn router() -> Router<AppState> {
+    Router::new().route(
+        "/echo",
+        get(get_echo)
+            .post(post_echo)
+            .put(put_echo)
+            .patch(patch_echo)
+            .delete(delete_echo)
+            .head(head_echo)
+            .options(options_echo),
+    )
 }
 
-#[utoipa::path(
-    get,
-    path = "/echo",
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.get", skip(headers, body))]
 async fn get_echo(
     method: Method,
@@ -41,12 +37,6 @@ async fn get_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    post,
-    path = "/echo",
-    request_body = String,
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.post", skip(headers, body))]
 async fn post_echo(
     method: Method,
@@ -57,12 +47,6 @@ async fn post_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    put,
-    path = "/echo",
-    request_body = String,
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.put", skip(headers, body))]
 async fn put_echo(
     method: Method,
@@ -73,12 +57,6 @@ async fn put_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    patch,
-    path = "/echo",
-    request_body = String,
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.patch", skip(headers, body))]
 async fn patch_echo(
     method: Method,
@@ -89,11 +67,6 @@ async fn patch_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    delete,
-    path = "/echo",
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.delete", skip(headers, body))]
 async fn delete_echo(
     method: Method,
@@ -104,11 +77,6 @@ async fn delete_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    head,
-    path = "/echo",
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.head", skip(headers, body))]
 async fn head_echo(
     method: Method,
@@ -119,11 +87,6 @@ async fn head_echo(
     Json(echo::echo(build_request_input(method, uri, headers, body)))
 }
 
-#[utoipa::path(
-    options,
-    path = "/echo",
-    responses((status = 200, description = "Echo response", body = EchoResponse))
-)]
 #[tracing::instrument(name = "echo.options", skip(headers, body))]
 async fn options_echo(
     method: Method,

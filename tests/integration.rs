@@ -318,3 +318,24 @@ async fn echo_routes_reflect_request() {
     assert_eq!(head_response.status(), StatusCode::OK);
     flush_telemetry().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openapi_routes_are_not_mounted() {
+    let router = setup_router().await;
+
+    for uri in ["/openapi.json", "/docs"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("request failed");
+
+        assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    }
+}

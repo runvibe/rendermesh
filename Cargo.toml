@@ -46,9 +46,6 @@ tracing-opentelemetry = "0.32"
 url = "2"
 uuid = { version = "1.22.0", features = ["serde", "v4"] }
 base64 = "0.22"
-utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
-utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
 bytes = "1.11.1"
 
 [dev-dependencies]
