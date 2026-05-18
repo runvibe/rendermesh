@@ -33,6 +33,8 @@ pub struct RenderGatewayService {
     edge_http: EdgeHttpRepository,
 }
 
+type EdgeChainResult = (Option<RenderResponse>, BTreeMap<String, String>);
+
 impl RenderGatewayService {
     pub fn new(
         resolver: HostResolver,
@@ -96,18 +98,19 @@ impl RenderGatewayService {
             return Ok(RenderResponse::empty(StatusCode::INTERNAL_SERVER_ERROR));
         };
 
-        if let Some(response) = self
+        let edge_result = self
             .handle_edge_chain(&request, &resolved, config, &cors_headers)
-            .await?
-        {
+            .await?;
+        if let Some(response) = edge_result.0 {
             return Ok(response);
         }
+        let response_headers = combined_response_headers(&edge_result.1, &cors_headers);
 
         if let Some(redirect) = find_redirect(config, &request.path, request.query.as_deref()) {
             let status = StatusCode::from_u16(redirect.status)?;
             let mut response = RenderResponse::empty(status);
             insert_header(&mut response.headers, "location", redirect.location);
-            apply_headers(&mut response.headers, cors_headers);
+            apply_headers(&mut response.headers, response_headers);
             return Ok(self.finalize_response(response, &request));
         }
 
@@ -118,7 +121,7 @@ impl RenderGatewayService {
                 &target,
                 StatusCode::OK,
                 None,
-                &cors_headers,
+                &response_headers,
             )
             .await?
         {
@@ -126,10 +129,10 @@ impl RenderGatewayService {
         }
 
         Ok(self
-            .handle_missing(&resolved.origin_id, config, &cors_headers)
+            .handle_missing(&resolved.origin_id, config, &response_headers)
             .await?
             .map(|response| self.finalize_response(response, &request))
-            .unwrap_or_else(|| self.finalize_response(not_found_text(cors_headers), &request)))
+            .unwrap_or_else(|| self.finalize_response(not_found_text(response_headers), &request)))
     }
 
     async fn handle_edge_chain(
@@ -138,7 +141,7 @@ impl RenderGatewayService {
         resolved: &ResolvedHost,
         config: &EdgeConfig,
         cors_headers: &BTreeMap<String, String>,
-    ) -> Result<Option<RenderResponse>> {
+    ) -> Result<EdgeChainResult> {
         let mut state = EdgeChainState::default();
 
         for hook in &config.edges {
@@ -153,7 +156,9 @@ impl RenderGatewayService {
                     tracing::error!(edge = %hook.name, "edge hook failed: {error}");
                     let mut response = RenderResponse::empty(edge_failure_status(&error));
                     apply_headers(&mut response.headers, cors_headers.clone());
-                    return Ok(Some(self.finalize_response(response, request)));
+                    return Ok(terminal_edge_response(
+                        self.finalize_response(response, request),
+                    ));
                 }
             };
 
@@ -164,7 +169,9 @@ impl RenderGatewayService {
                         tracing::error!(edge = %hook.name, "edge payload failed: {error}");
                         let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
                         apply_headers(&mut response.headers, cors_headers.clone());
-                        return Ok(Some(self.finalize_response(response, request)));
+                        return Ok(terminal_edge_response(
+                            self.finalize_response(response, request),
+                        ));
                     }
                 };
 
@@ -178,7 +185,9 @@ impl RenderGatewayService {
                     };
                     apply_headers(&mut response.headers, filtered_headers(&state.headers));
                     apply_headers(&mut response.headers, cors_headers.clone());
-                    return Ok(Some(self.finalize_response(response, request)));
+                    return Ok(terminal_edge_response(
+                        self.finalize_response(response, request),
+                    ));
                 }
                 EdgePayloadOutcome::ServeFile {
                     status,
@@ -197,9 +206,13 @@ impl RenderGatewayService {
                     else {
                         let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
                         apply_headers(&mut response.headers, cors_headers.clone());
-                        return Ok(Some(self.finalize_response(response, request)));
+                        return Ok(terminal_edge_response(
+                            self.finalize_response(response, request),
+                        ));
                     };
-                    return Ok(Some(self.with_edge_headers(response, &state, request)));
+                    return Ok(terminal_edge_response(
+                        self.with_edge_headers(response, &state, request),
+                    ));
                 }
                 EdgePayloadOutcome::RenderTarget { status, params } => {
                     let target = self.resolve_request_target(config, &request.path);
@@ -215,14 +228,18 @@ impl RenderGatewayService {
                     else {
                         let mut response = not_found_text(cors_headers.clone());
                         response.status = StatusCode::NOT_FOUND;
-                        return Ok(Some(self.finalize_response(response, request)));
+                        return Ok(terminal_edge_response(
+                            self.finalize_response(response, request),
+                        ));
                     };
-                    return Ok(Some(self.with_edge_headers(response, &state, request)));
+                    return Ok(terminal_edge_response(
+                        self.with_edge_headers(response, &state, request),
+                    ));
                 }
             }
         }
 
-        Ok(None)
+        Ok((None, filtered_headers(&state.headers)))
     }
 
     fn with_edge_headers(
@@ -403,6 +420,10 @@ fn edge_hook_request(request: &RenderRequest) -> EdgeHookRequest {
     }
 }
 
+fn terminal_edge_response(response: RenderResponse) -> EdgeChainResult {
+    (Some(response), BTreeMap::new())
+}
+
 fn full_request_url(request: &RenderRequest) -> String {
     let mut url = format!("{}://{}{}", request.scheme, request.host, request.path);
     if let Some(query) = request.query.as_deref().filter(|value| !value.is_empty()) {
@@ -480,6 +501,15 @@ fn edge_failure_status(error: &anyhow::Error) -> StatusCode {
     }
 }
 
+fn combined_response_headers(
+    edge_headers: &BTreeMap<String, String>,
+    cors_headers: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut headers = edge_headers.clone();
+    apply_headers(&mut headers, cors_headers.clone());
+    headers
+}
+
 fn filtered_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .iter()
@@ -504,29 +534,20 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 
 fn apply_headers(target: &mut BTreeMap<String, String>, headers: BTreeMap<String, String>) {
     for (name, value) in headers {
-        insert_header(target, name, value);
+        insert_header(target, &name, value);
     }
 }
-
-fn insert_header(
-    headers: &mut BTreeMap<String, String>,
-    name: impl Into<String>,
-    value: impl Into<String>,
-) {
-    headers.insert(name.into().to_ascii_lowercase(), value.into());
+fn insert_header(headers: &mut BTreeMap<String, String>, name: &str, value: impl Into<String>) {
+    headers.insert(name.to_ascii_lowercase(), value.into());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        repositories::local_mirror::{metadata_sidecar_path, LocalMirrorRepository},
-        services::{
-            cors::CorsPolicy,
-            edge_config::{default_edge_config, parse_edge_config_yaml},
-            manifest::{parse_manifest_yaml, HostResolver},
-        },
-    };
+    use crate::repositories::local_mirror::{metadata_sidecar_path, LocalMirrorRepository};
+    use crate::services::cors::CorsPolicy;
+    use crate::services::edge_config::{default_edge_config, parse_edge_config_yaml};
+    use crate::services::manifest::{parse_manifest_yaml, HostResolver};
     use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
     use wiremock::{
         matchers::{method, path},
@@ -544,25 +565,19 @@ mod tests {
         )
         .await;
         let service = test_gateway(temp.path().join("origins"));
-
         let response = service
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>Hello</h1>"));
-        assert_eq!(
-            response.headers.get("content-type").map(String::as_str),
-            Some("text/html")
-        );
+        assert_header(&response, "content-type", "text/html");
     }
 
     #[tokio::test]
     async fn unknown_host_returns_421() {
         let temp = tempfile::tempdir().expect("tempdir");
         let service = test_gateway(temp.path().join("origins"));
-
         let response = service
             .handle(RenderRequest {
                 host: "unknown.test".to_string(),
@@ -570,7 +585,6 @@ mod tests {
             })
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::MISDIRECTED_REQUEST);
     }
 
@@ -584,12 +598,10 @@ mod tests {
             LocalMirrorRepository::new(temp.path().join("origins")),
             BTreeMap::new(),
         );
-
         let response = service
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(response.body.is_empty());
     }
@@ -599,12 +611,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(temp.path(), "index.html", "<h1>Shell</h1>", None).await;
         let service = test_gateway(temp.path().join("origins"));
-
         let response = service
             .handle(test_request(Method::GET, "/missing"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::NOT_FOUND);
         assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>Shell</h1>"));
     }
@@ -614,12 +624,10 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(temp.path(), "docs/index.html", "<h1>Docs</h1>", None).await;
         let service = test_gateway(temp.path().join("origins"));
-
         let response = service
             .handle(test_request(Method::GET, "/docs"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>Docs</h1>"));
     }
@@ -647,10 +655,7 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status, StatusCode::PERMANENT_REDIRECT);
-        assert_eq!(
-            response.headers.get("location").map(String::as_str),
-            Some("/new?a=1")
-        );
+        assert_header(&response, "location", "/new?a=1");
         assert!(response.body.is_empty());
     }
 
@@ -696,14 +701,8 @@ mod tests {
 
         assert_eq!(response.status, StatusCode::OK);
         assert!(response.body.is_empty());
-        assert_eq!(
-            response.headers.get("content-type").map(String::as_str),
-            Some("text/html")
-        );
-        assert_eq!(
-            response.headers.get("etag").map(String::as_str),
-            Some("abc")
-        );
+        assert_header(&response, "content-type", "text/html");
+        assert_header(&response, "etag", "abc");
     }
 
     #[tokio::test]
@@ -715,19 +714,11 @@ mod tests {
         let response = service.handle(request).await.expect("response");
 
         assert_eq!(response.status, StatusCode::NO_CONTENT);
-        assert_eq!(
-            response
-                .headers
-                .get("access-control-allow-origin")
-                .map(String::as_str),
-            Some("https://web.test")
-        );
-        assert_eq!(
-            response
-                .headers
-                .get("access-control-allow-methods")
-                .map(String::as_str),
-            Some("GET, HEAD, OPTIONS")
+        assert_header(&response, "access-control-allow-origin", "https://web.test");
+        assert_header(
+            &response,
+            "access-control-allow-methods",
+            "GET, HEAD, OPTIONS",
         );
         assert!(response.body.is_empty());
     }
@@ -742,26 +733,43 @@ mod tests {
         let response = service.handle(request).await.expect("response");
 
         assert_eq!(response.status, StatusCode::OK);
-        assert_eq!(
-            response
-                .headers
-                .get("access-control-allow-origin")
-                .map(String::as_str),
-            Some("https://web.test")
-        );
+        assert_header(&response, "access-control-allow-origin", "https://web.test");
+    }
+
+    #[tokio::test]
+    async fn edge_headers_only_payload_applies_to_normal_static_response() {
+        let server = edge_server(
+            200,
+            serde_json::json!({
+                "headers": {"x-edge": "yes", "connection": "close"}
+            }),
+        )
+        .await;
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(temp.path(), "index.html", "<h1>Hello</h1>", None).await;
+        let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
+
+        let response = service
+            .handle(test_request(Method::GET, "/"))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status, StatusCode::OK);
+        assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>Hello</h1>"));
+        assert_header(&response, "x-edge", "yes");
+        assert!(!response.headers.contains_key("connection"));
     }
 
     #[tokio::test]
     async fn edge_body_outcome_returns_edge_body_status_and_headers() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/edge"))
-            .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
+        let server = edge_server(
+            202,
+            serde_json::json!({
                 "body": "edge body",
                 "headers": {"x-edge": "yes"}
-            })))
-            .mount(&server)
-            .await;
+            }),
+        )
+        .await;
         let temp = tempfile::tempdir().expect("tempdir");
         let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
 
@@ -772,23 +780,19 @@ mod tests {
 
         assert_eq!(response.status, StatusCode::ACCEPTED);
         assert_eq!(response.body, bytes::Bytes::from_static(b"edge body"));
-        assert_eq!(
-            response.headers.get("x-edge").map(String::as_str),
-            Some("yes")
-        );
+        assert_header(&response, "x-edge", "yes");
     }
 
     #[tokio::test]
     async fn edge_file_path_outcome_serves_specified_file_with_edge_status() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/edge"))
-            .respond_with(ResponseTemplate::new(203).set_body_json(serde_json::json!({
+        let server = edge_server(
+            203,
+            serde_json::json!({
                 "file_path": "/edge.html",
                 "headers": {"x-edge": "file"}
-            })))
-            .mount(&server)
-            .await;
+            }),
+        )
+        .await;
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(temp.path(), "edge.html", "<h1>Edge File</h1>", None).await;
         let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
@@ -803,23 +807,19 @@ mod tests {
             response.body,
             bytes::Bytes::from_static(b"<h1>Edge File</h1>")
         );
-        assert_eq!(
-            response.headers.get("x-edge").map(String::as_str),
-            Some("file")
-        );
+        assert_header(&response, "x-edge", "file");
     }
 
     #[tokio::test]
     async fn edge_params_renders_target_html() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/edge"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = edge_server(
+            200,
+            serde_json::json!({
                 "params": {"title": "Edge Title"},
                 "headers": {"x-edge": "params"}
-            })))
-            .mount(&server)
-            .await;
+            }),
+        )
+        .await;
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(
             temp.path(),
@@ -840,22 +840,18 @@ mod tests {
             response.body,
             bytes::Bytes::from_static(b"<h1>Edge Title</h1>")
         );
-        assert_eq!(
-            response.headers.get("x-edge").map(String::as_str),
-            Some("params")
-        );
+        assert_header(&response, "x-edge", "params");
     }
 
     #[tokio::test]
     async fn edge_params_on_non_html_returns_415() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/edge"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        let server = edge_server(
+            200,
+            serde_json::json!({
                 "params": {"title": "Edge Title"}
-            })))
-            .mount(&server)
-            .await;
+            }),
+        )
+        .await;
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(
             temp.path(),
@@ -878,7 +874,18 @@ mod tests {
     fn test_gateway(root: std::path::PathBuf) -> RenderGatewayService {
         test_gateway_with_config(root, default_edge_config())
     }
-
+    fn assert_header(response: &RenderResponse, name: &str, value: &str) {
+        assert_eq!(response.headers.get(name).map(String::as_str), Some(value));
+    }
+    async fn edge_server(status: u16, body: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/edge"))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&server)
+            .await;
+        server
+    }
     fn test_gateway_with_edge_url(
         root: std::path::PathBuf,
         edge_base_url: &str,
@@ -894,7 +901,6 @@ mod tests {
             )),
         )
     }
-
     fn test_gateway_with_config(
         root: std::path::PathBuf,
         config: EdgeConfig,
@@ -908,7 +914,6 @@ mod tests {
             [("web".to_string(), config)].into(),
         )
     }
-
     fn test_request(method: Method, path: &str) -> RenderRequest {
         RenderRequest {
             method,
