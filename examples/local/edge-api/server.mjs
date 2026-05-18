@@ -28,7 +28,7 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (path === "/static.html" || path.startsWith("/docs")) {
+  if (path === "/static.html" || path === "/legacy" || path.startsWith("/docs")) {
     sendJson(response, 200, {
       headers: {
         "x-rendermesh-edge": "static-pass-through"
