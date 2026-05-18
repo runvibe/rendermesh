@@ -41,18 +41,6 @@ pub enum RenderTemplateError {
     Template(#[from] handlebars::TemplateError),
 }
 
-impl PartialEq for RenderTemplateError {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (
-                RenderTemplateError::UnsupportedMediaType,
-                RenderTemplateError::UnsupportedMediaType
-            )
-        )
-    }
-}
-
 pub fn apply_edge_payload(
     state: &mut EdgeChainState,
     status: StatusCode,
@@ -232,6 +220,6 @@ mod tests {
         )
         .expect_err("non-html templates are rejected");
 
-        assert_eq!(error, RenderTemplateError::UnsupportedMediaType);
+        assert!(matches!(error, RenderTemplateError::UnsupportedMediaType));
     }
 }
