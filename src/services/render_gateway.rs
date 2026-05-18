@@ -64,9 +64,7 @@ impl RenderGatewayService {
         let Some(resolved) = self.resolver.resolve(&request.host) else {
             return Ok(RenderResponse::empty(StatusCode::MISDIRECTED_REQUEST));
         };
-
         let cors_headers = self.cors_headers(&resolved.origin_id, &request);
-
         if request.method == Method::OPTIONS {
             let mut response = RenderResponse::empty(StatusCode::NO_CONTENT);
             apply_headers(&mut response.headers, cors_headers);
@@ -85,19 +83,20 @@ impl RenderGatewayService {
             }
             return Ok(response);
         }
-
         if request.method != Method::GET && request.method != Method::HEAD {
-            return Ok(RenderResponse::empty(StatusCode::METHOD_NOT_ALLOWED));
+            let mut response = RenderResponse::empty(StatusCode::METHOD_NOT_ALLOWED);
+            apply_headers(&mut response.headers, cors_headers);
+            return Ok(response);
         }
-
         let Some(config) = self.edge_configs.get(&resolved.origin_id) else {
             tracing::error!(
                 origin_id = %resolved.origin_id,
                 "resolved origin is missing edge config"
             );
-            return Ok(RenderResponse::empty(StatusCode::INTERNAL_SERVER_ERROR));
+            let mut response = RenderResponse::empty(StatusCode::INTERNAL_SERVER_ERROR);
+            apply_headers(&mut response.headers, cors_headers);
+            return Ok(response);
         };
-
         let edge_result = self
             .handle_edge_chain(&request, &resolved, config, &cors_headers)
             .await?;
@@ -105,7 +104,6 @@ impl RenderGatewayService {
             return Ok(response);
         }
         let response_headers = combined_response_headers(&edge_result.1, &cors_headers);
-
         if let Some(redirect) = find_redirect(config, &request.path, request.query.as_deref()) {
             let status = StatusCode::from_u16(redirect.status)?;
             let mut response = RenderResponse::empty(status);
@@ -113,7 +111,6 @@ impl RenderGatewayService {
             apply_headers(&mut response.headers, response_headers);
             return Ok(self.finalize_response(response, &request));
         }
-
         let target = self.resolve_request_target(config, &request.path);
         if let Some(response) = self
             .serve_static_path(
@@ -143,7 +140,6 @@ impl RenderGatewayService {
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<EdgeChainResult> {
         let mut state = EdgeChainState::default();
-
         for hook in &config.edges {
             let edge_request = edge_hook_request(request);
             let edge_response = match self
@@ -161,7 +157,6 @@ impl RenderGatewayService {
                     ));
                 }
             };
-
             let outcome =
                 match apply_edge_payload(&mut state, edge_response.status, edge_response.payload) {
                     Ok(outcome) => outcome,
@@ -174,7 +169,6 @@ impl RenderGatewayService {
                         ));
                     }
                 };
-
             match outcome {
                 EdgePayloadOutcome::Continue => {}
                 EdgePayloadOutcome::RespondDirect { status, body } => {
@@ -238,7 +232,6 @@ impl RenderGatewayService {
                 }
             }
         }
-
         Ok((None, filtered_headers(&state.headers)))
     }
 
@@ -271,18 +264,15 @@ impl RenderGatewayService {
         {
             return Ok(Some(response));
         }
-
         let Some(config) = self.edge_configs.get(origin_id) else {
             return Ok(None);
         };
-
         if config.edge.auto_rewrite_index {
             let candidate = auto_index_candidate(path);
             return self
                 .serve_object(origin_id, &candidate, status, params, cors_headers)
                 .await;
         }
-
         Ok(None)
     }
 
@@ -297,7 +287,6 @@ impl RenderGatewayService {
         let Some(object) = self.safe_read_object(origin_id, path).await? else {
             return Ok(None);
         };
-
         let mut headers = headers_from_metadata(&object.metadata);
         apply_headers(&mut headers, cors_headers.clone());
         let body = match params {
@@ -321,7 +310,6 @@ impl RenderGatewayService {
             },
             None => object.body,
         };
-
         Ok(Some(RenderResponse {
             status,
             headers,
@@ -513,15 +501,18 @@ fn combined_response_headers(
 fn filtered_headers(headers: &BTreeMap<String, String>) -> BTreeMap<String, String> {
     headers
         .iter()
-        .filter(|(name, _)| !is_hop_by_hop_header(name))
+        .filter(|(name, _)| !is_unsafe_edge_header(name))
         .map(|(name, value)| (name.to_ascii_lowercase(), value.clone()))
         .collect()
 }
 
-fn is_hop_by_hop_header(name: &str) -> bool {
+fn is_unsafe_edge_header(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
         "connection"
+            | "content-encoding"
+            | "content-length"
+            | "host"
             | "keep-alive"
             | "proxy-authenticate"
             | "proxy-authorization"
@@ -599,10 +590,11 @@ mod tests {
             BTreeMap::new(),
         );
         let response = service
-            .handle(test_request(Method::GET, "/"))
+            .handle(test_request_with_origin(Method::GET, "/"))
             .await
             .expect("response");
         assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_header(&response, "access-control-allow-origin", "https://web.test");
         assert!(response.body.is_empty());
     }
 
@@ -653,7 +645,6 @@ mod tests {
             })
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::PERMANENT_REDIRECT);
         assert_header(&response, "location", "/new?a=1");
         assert!(response.body.is_empty());
@@ -677,7 +668,6 @@ mod tests {
             .handle(test_request(Method::GET, "/app"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>App</h1>"));
     }
@@ -698,7 +688,6 @@ mod tests {
             .handle(test_request(Method::HEAD, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert!(response.body.is_empty());
         assert_header(&response, "content-type", "text/html");
@@ -710,9 +699,7 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let service = test_gateway(temp.path().join("origins"));
         let request = test_request_with_origin(Method::OPTIONS, "/");
-
         let response = service.handle(request).await.expect("response");
-
         assert_eq!(response.status, StatusCode::NO_CONTENT);
         assert_header(&response, "access-control-allow-origin", "https://web.test");
         assert_header(
@@ -729,10 +716,20 @@ mod tests {
         write_object(temp.path(), "index.html", "<h1>Hello</h1>", None).await;
         let service = test_gateway(temp.path().join("origins"));
         let request = test_request_with_origin(Method::GET, "/");
-
         let response = service.handle(request).await.expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
+        assert_header(&response, "access-control-allow-origin", "https://web.test");
+    }
+
+    #[tokio::test]
+    async fn unsupported_method_includes_cors_header_for_allowed_origin() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let service = test_gateway(temp.path().join("origins"));
+        let response = service
+            .handle(test_request_with_origin(Method::POST, "/"))
+            .await
+            .expect("response");
+        assert_eq!(response.status, StatusCode::METHOD_NOT_ALLOWED);
         assert_header(&response, "access-control-allow-origin", "https://web.test");
     }
 
@@ -741,7 +738,12 @@ mod tests {
         let server = edge_server(
             200,
             serde_json::json!({
-                "headers": {"x-edge": "yes", "connection": "close"}
+                "headers": {
+                    "x-edge": "yes",
+                    "content-length": "999",
+                    "content-encoding": "gzip",
+                    "connection": "close"
+                }
             }),
         )
         .await;
@@ -753,10 +755,11 @@ mod tests {
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(response.body, bytes::Bytes::from_static(b"<h1>Hello</h1>"));
         assert_header(&response, "x-edge", "yes");
+        assert!(!response.headers.contains_key("content-length"));
+        assert!(!response.headers.contains_key("content-encoding"));
         assert!(!response.headers.contains_key("connection"));
     }
 
@@ -777,7 +780,6 @@ mod tests {
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::ACCEPTED);
         assert_eq!(response.body, bytes::Bytes::from_static(b"edge body"));
         assert_header(&response, "x-edge", "yes");
@@ -801,7 +803,6 @@ mod tests {
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::NON_AUTHORITATIVE_INFORMATION);
         assert_eq!(
             response.body,
@@ -834,7 +835,6 @@ mod tests {
             .handle(test_request(Method::GET, "/"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::OK);
         assert_eq!(
             response.body,
@@ -866,7 +866,6 @@ mod tests {
             .handle(test_request(Method::GET, "/data.json"))
             .await
             .expect("response");
-
         assert_eq!(response.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
         assert!(response.body.is_empty());
     }
