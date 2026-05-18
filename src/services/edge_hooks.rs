@@ -34,26 +34,23 @@ pub fn apply_edge_payload(
     status: StatusCode,
     payload: EdgeHookPayload,
 ) -> Result<EdgePayloadOutcome> {
-    state.headers.extend(payload.headers);
-
-    if let Some(body) = payload.body {
-        return Ok(EdgePayloadOutcome::RespondDirect { status, body });
-    }
-
-    if let Some(file_path) = payload.file_path {
+    let outcome = if let Some(body) = payload.body {
+        EdgePayloadOutcome::RespondDirect { status, body }
+    } else if let Some(file_path) = payload.file_path {
         validate_edge_file_path(&file_path)?;
-        return Ok(EdgePayloadOutcome::ServeFile {
+        EdgePayloadOutcome::ServeFile {
             status,
             file_path,
             params: payload.params,
-        });
-    }
+        }
+    } else if let Some(params) = payload.params {
+        EdgePayloadOutcome::RenderTarget { status, params }
+    } else {
+        EdgePayloadOutcome::Continue
+    };
 
-    if let Some(params) = payload.params {
-        return Ok(EdgePayloadOutcome::RenderTarget { status, params });
-    }
-
-    Ok(EdgePayloadOutcome::Continue)
+    state.headers.extend(payload.headers);
+    Ok(outcome)
 }
 
 pub fn validate_edge_file_path(path: &str) -> Result<()> {
@@ -121,5 +118,43 @@ mod tests {
         let error = validate_edge_file_path("../secret").expect_err("invalid path");
 
         assert!(error.to_string().contains("invalid file_path"));
+    }
+
+    #[test]
+    fn invalid_file_path_with_headers_does_not_mutate_state_headers() {
+        let mut state = EdgeChainState {
+            headers: [("x-existing".to_string(), "kept".to_string())].into(),
+        };
+
+        let error = apply_edge_payload(
+            &mut state,
+            StatusCode::OK,
+            EdgeHookPayload {
+                headers: [("x-new".to_string(), "rejected".to_string())].into(),
+                body: None,
+                file_path: Some("/safe/../secret".to_string()),
+                params: None,
+            },
+        )
+        .expect_err("invalid path is rejected");
+
+        assert!(error.to_string().contains("invalid file_path"));
+        assert_eq!(state.headers.len(), 1);
+        assert_eq!(state.headers["x-existing"], "kept");
+        assert!(!state.headers.contains_key("x-new"));
+    }
+
+    #[test]
+    fn validate_edge_file_path_rejects_parent_segments_and_control_chars() {
+        for path in ["/../secret", "/safe/../secret", "/safe/\nsecret"] {
+            let error = validate_edge_file_path(path).expect_err("path is invalid");
+
+            assert!(error.to_string().contains("invalid file_path"));
+        }
+    }
+
+    #[test]
+    fn validate_edge_file_path_accepts_benign_dotted_names() {
+        validate_edge_file_path("/safe/v1..2/index.html").expect("path is valid");
     }
 }
