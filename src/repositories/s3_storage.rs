@@ -46,6 +46,7 @@ impl S3StorageRepository {
         let credentials =
             Credentials::new(access_key_id, secret_access_key, None, None, "rendermesh");
         let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version_latest()
             .endpoint_url(endpoint)
             .region(Region::new(region))
             .credentials_provider(credentials)
@@ -84,6 +85,53 @@ mod tests {
         let error =
             parse_force_path_style_env("S3_FORCE_PATH_STYLE", "maybe").expect_err("invalid value");
         assert!(error.to_string().contains("S3_FORCE_PATH_STYLE"));
+    }
+
+    #[tokio::test]
+    async fn builds_s3_client_from_origin_env_without_panicking() {
+        let _endpoint = EnvVarGuard::set("TEST_S3_ENDPOINT", "http://127.0.0.1:9000");
+        let _region = EnvVarGuard::set("TEST_S3_REGION", "us-east-1");
+        let _access_key = EnvVarGuard::set("TEST_S3_ACCESS_KEY_ID", "rendermesh");
+        let _secret_key = EnvVarGuard::set("TEST_S3_SECRET_ACCESS_KEY", "rendermesh-secret");
+        let _force_path_style = EnvVarGuard::set("TEST_S3_FORCE_PATH_STYLE", "true");
+
+        let origin = OriginConfig {
+            origin_type: crate::dto::manifest::OriginType::S3,
+            bucket: "rendermesh-local".to_string(),
+            endpoint_env: "TEST_S3_ENDPOINT".to_string(),
+            region_env: "TEST_S3_REGION".to_string(),
+            access_key_id_env: "TEST_S3_ACCESS_KEY_ID".to_string(),
+            secret_access_key_env: "TEST_S3_SECRET_ACCESS_KEY".to_string(),
+            force_path_style_env: Some("TEST_S3_FORCE_PATH_STYLE".to_string()),
+            sync_interval_seconds: None,
+        };
+
+        let _repository = S3StorageRepository::from_origin_config(&origin)
+            .await
+            .expect("repository builds");
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 }
 
