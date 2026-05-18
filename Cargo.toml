@@ -1,5 +1,5 @@
 [package]
-name = "rust-api-template"
+name = "rendermesh"
 version = "0.1.0"
 edition = "2021"
 authors = ["Philippe Assis <codephilippe@gmail.com>"]
