@@ -1,9 +1,13 @@
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::Result;
 use axum::http::StatusCode;
 
-use crate::dto::edge::{EdgeHookPayload, EdgeHookRequest};
+use crate::{
+    dto::edge::{EdgeHookPayload, EdgeHookRequest},
+    libs::observability::elapsed_ms,
+};
 
 #[derive(Clone)]
 pub struct EdgeHttpRepository {
@@ -29,15 +33,42 @@ impl EdgeHttpRepository {
         timeout_ms: u64,
         request: &EdgeHookRequest,
     ) -> Result<EdgeHttpResponse> {
+        let start = Instant::now();
+        tracing::info!(
+            edge_url = %url,
+            timeout_ms,
+            method = %request.method,
+            request_url = %request.url,
+            "edge_http_request_start"
+        );
         let response = self
             .client
             .post(url)
             .timeout(Duration::from_millis(timeout_ms))
             .json(request)
             .send()
-            .await?;
+            .await
+            .inspect_err(|error| {
+                tracing::error!(
+                    edge_url = %url,
+                    duration_ms = elapsed_ms(start),
+                    "edge_http_request_error: {error}"
+                );
+            })?;
         let status = StatusCode::from_u16(response.status().as_u16())?;
+        tracing::info!(
+            edge_url = %url,
+            status = status.as_u16(),
+            duration_ms = elapsed_ms(start),
+            "edge_http_response_received"
+        );
         let payload = response.json::<EdgeHookPayload>().await?;
+        tracing::info!(
+            edge_url = %url,
+            status = status.as_u16(),
+            duration_ms = elapsed_ms(start),
+            "edge_http_payload_decoded"
+        );
 
         Ok(EdgeHttpResponse { status, payload })
     }

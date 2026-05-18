@@ -119,6 +119,19 @@ HTML templates are compiled into an in-memory Handlebars registry after bucket s
 
 CORS is derived from the manifest host map. Exact hosts allow their matching `https://host` origins; wildcard hosts reflect matching subdomains. Users do not configure per-origin CORS manually.
 
+## Observability
+
+OpenTelemetry remains available through the existing tracing setup. RenderMesh emits structured spans for the full request path:
+
+- `rendermesh.request`: incoming fallback request, final status, and total duration.
+- `rendermesh.read_body`: request body read duration and byte count.
+- `rendermesh.gateway`: gateway orchestration with host, path, origin, status, and duration.
+- `rendermesh.resolve_host`, `rendermesh.cors`, `rendermesh.edge_config`, `rendermesh.redirect`, and `rendermesh.resolve_target`: routing and rule resolution steps.
+- `rendermesh.edge_chain` and `rendermesh.edge_hook`: edge execution, outcome, status, timeout, and response time.
+- `edge_http_request_start`, `edge_http_response_received`, and `edge_http_payload_decoded`: before/after markers around the external edge API call.
+- `rendermesh.static`, `rendermesh.object`, `rendermesh.template_render`, and `rendermesh.missing`: local mirror lookup, HTML template render, auto-index, and missing-file handling.
+- `rendermesh.response_build`: final response assembly timing.
+
 ## Environment
 
 Common variables:

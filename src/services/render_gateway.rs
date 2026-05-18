@@ -1,14 +1,16 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use axum::http::{header, Method, StatusCode};
 use bytes::Bytes;
+use tracing::Instrument;
 
 use crate::{
     dto::{
         edge::{EdgeConfig, EdgeHookRequest},
         render::{RenderRequest, RenderResponse},
     },
+    libs::observability::elapsed_ms,
     repositories::{
         edge_http::EdgeHttpRepository,
         local_mirror::{LocalMirrorRepository, LocalObject, ObjectMetadata},
@@ -108,12 +110,54 @@ impl RenderGatewayService {
         )
     }
 
+    #[tracing::instrument(
+        name = "rendermesh.gateway",
+        skip(self, request),
+        fields(
+            method = %request.method,
+            host = %request.host,
+            path = %request.path,
+            status = tracing::field::Empty,
+            origin_id = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        )
+    )]
     pub async fn handle(&self, request: RenderRequest) -> Result<RenderResponse> {
-        let Some(resolved) = self.resolver.resolve(&request.host) else {
+        let start = Instant::now();
+        let result = self.handle_inner(request).await;
+        if let Ok(response) = &result {
+            tracing::Span::current().record("status", response.status.as_u16());
+        }
+        tracing::Span::current().record("duration_ms", elapsed_ms(start));
+        result
+    }
+
+    async fn handle_inner(&self, request: RenderRequest) -> Result<RenderResponse> {
+        let resolve_start = Instant::now();
+        let resolve_span = tracing::info_span!(
+            "rendermesh.resolve_host",
+            host = %request.host,
+            found = tracing::field::Empty,
+            origin_id = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        let resolved = resolve_span.in_scope(|| self.resolver.resolve(&request.host));
+        resolve_span.record("duration_ms", elapsed_ms(resolve_start));
+        let Some(resolved) = resolved else {
+            resolve_span.record("found", false);
             return Ok(RenderResponse::empty(StatusCode::MISDIRECTED_REQUEST));
         };
-        let cors_headers = self.cors_headers(&resolved.origin_id, &request);
+        resolve_span.record("found", true);
+        resolve_span.record("origin_id", resolved.origin_id.as_str());
+        tracing::Span::current().record("origin_id", resolved.origin_id.as_str());
+        let cors_headers = tracing::info_span!(
+            "rendermesh.cors",
+            origin_id = %resolved.origin_id,
+            host = %request.host
+        )
+        .in_scope(|| self.cors_headers(&resolved.origin_id, &request));
         if request.method == Method::OPTIONS {
+            tracing::info!("handling cors preflight");
             let mut response = RenderResponse::empty(StatusCode::NO_CONTENT);
             apply_headers(&mut response.headers, cors_headers);
             insert_header(
@@ -132,19 +176,32 @@ impl RenderGatewayService {
             return Ok(response);
         }
         if request.method != Method::GET && request.method != Method::HEAD {
+            tracing::info!(method = %request.method, "method not allowed");
             let mut response = RenderResponse::empty(StatusCode::METHOD_NOT_ALLOWED);
             apply_headers(&mut response.headers, cors_headers);
             return Ok(response);
         }
-        let config = match self.edge_configs.get(&resolved.origin_id) {
+        let edge_config_start = Instant::now();
+        let edge_config_span = tracing::info_span!(
+            "rendermesh.edge_config",
+            origin_id = %resolved.origin_id,
+            valid = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        let edge_config_result =
+            edge_config_span.in_scope(|| self.edge_configs.get(&resolved.origin_id));
+        edge_config_span.record("duration_ms", elapsed_ms(edge_config_start));
+        let config = match edge_config_result {
             Ok(config) => config,
             Err(error) => {
+                edge_config_span.record("valid", false);
                 log_edge_config_error(&resolved.origin_id, error);
                 let mut response = RenderResponse::empty(StatusCode::INTERNAL_SERVER_ERROR);
                 apply_headers(&mut response.headers, cors_headers);
                 return Ok(response);
             }
         };
+        edge_config_span.record("valid", true);
         let edge_result = self
             .handle_edge_chain(&request, &resolved, &config, &cors_headers)
             .await?;
@@ -152,14 +209,27 @@ impl RenderGatewayService {
             return Ok(response);
         }
         let response_headers = combined_response_headers(&edge_result.1, &cors_headers);
-        if let Some(redirect) = find_redirect(&config, &request.path, request.query.as_deref()) {
+        let redirect_start = Instant::now();
+        let redirect_span = tracing::info_span!(
+            "rendermesh.redirect",
+            path = %request.path,
+            matched = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        let redirect = redirect_span
+            .in_scope(|| find_redirect(&config, &request.path, request.query.as_deref()));
+        redirect_span.record("duration_ms", elapsed_ms(redirect_start));
+        if let Some(redirect) = redirect {
+            redirect_span.record("matched", true);
             let status = StatusCode::from_u16(redirect.status)?;
             let mut response = RenderResponse::empty(status);
             insert_header(&mut response.headers, "location", redirect.location);
             apply_headers(&mut response.headers, response_headers);
             return Ok(self.finalize_response(response, &request));
         }
-        let target = self.resolve_request_target(&config, &request.path);
+        redirect_span.record("matched", false);
+        let target = tracing::info_span!("rendermesh.resolve_target", path = %request.path)
+            .in_scope(|| self.resolve_request_target(&config, &request.path));
         if let Some(response) = self
             .serve_static_path(
                 &resolved.origin_id,
@@ -188,108 +258,179 @@ impl RenderGatewayService {
         config: &EdgeConfig,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<EdgeChainResult> {
-        let mut state = EdgeChainState::default();
-        for hook in &config.edges {
-            let edge_request = edge_hook_request(request);
-            let edge_response = match self
-                .edge_http
-                .call(&hook.url, hook.timeout_ms, &edge_request)
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::error!(edge = %hook.name, "edge hook failed: {error}");
-                    let mut response = RenderResponse::empty(edge_failure_status(&error));
-                    apply_headers(&mut response.headers, cors_headers.clone());
-                    return Ok(terminal_edge_response(
-                        self.finalize_response(response, request),
-                    ));
-                }
-            };
-            let outcome =
-                match apply_edge_payload(&mut state, edge_response.status, edge_response.payload) {
-                    Ok(outcome) => outcome,
+        let start = Instant::now();
+        let span = tracing::info_span!(
+            "rendermesh.edge_chain",
+            origin_id = %resolved.origin_id,
+            host = %request.host,
+            path = %request.path,
+            edge_count = config.edges.len(),
+            terminal = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        async move {
+            let mut state = EdgeChainState::default();
+            for hook in &config.edges {
+                let edge_request = edge_hook_request(request);
+                let edge_span = tracing::info_span!(
+                    "rendermesh.edge_hook",
+                    edge = %hook.name,
+                    edge_url = %hook.url,
+                    timeout_ms = hook.timeout_ms,
+                    status = tracing::field::Empty,
+                    outcome = tracing::field::Empty,
+                    duration_ms = tracing::field::Empty
+                );
+                let edge_start = Instant::now();
+                edge_span.in_scope(|| {
+                    tracing::info!(edge = %hook.name, edge_url = %hook.url, "edge_hook_request_start");
+                });
+                let edge_response = match self
+                    .edge_http
+                    .call(&hook.url, hook.timeout_ms, &edge_request)
+                    .instrument(edge_span.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        edge_span.record("status", response.status.as_u16());
+                        edge_span.record("duration_ms", elapsed_ms(edge_start));
+                        edge_span.in_scope(|| {
+                            tracing::info!(
+                                edge = %hook.name,
+                                status = response.status.as_u16(),
+                                duration_ms = elapsed_ms(edge_start),
+                                "edge_hook_request_finish"
+                            );
+                        });
+                        response
+                    }
                     Err(error) => {
-                        tracing::error!(edge = %hook.name, "edge payload failed: {error}");
-                        let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
+                        edge_span.record("outcome", "error");
+                        edge_span.record("duration_ms", elapsed_ms(edge_start));
+                        tracing::error!(
+                            edge = %hook.name,
+                            duration_ms = elapsed_ms(edge_start),
+                            "edge hook failed: {error}"
+                        );
+                        let mut response = RenderResponse::empty(edge_failure_status(&error));
                         apply_headers(&mut response.headers, cors_headers.clone());
+                        tracing::Span::current().record("terminal", true);
+                        tracing::Span::current().record("duration_ms", elapsed_ms(start));
                         return Ok(terminal_edge_response(
                             self.finalize_response(response, request),
                         ));
                     }
                 };
-            match outcome {
-                EdgePayloadOutcome::Continue => {}
-                EdgePayloadOutcome::RespondDirect { status, body } => {
-                    let mut response = RenderResponse {
-                        status,
-                        headers: BTreeMap::new(),
-                        body: Bytes::from(body),
-                    };
-                    apply_headers(&mut response.headers, filtered_headers(&state.headers));
-                    apply_headers(&mut response.headers, cors_headers.clone());
-                    return Ok(terminal_edge_response(
-                        self.finalize_response(response, request),
-                    ));
-                }
-                EdgePayloadOutcome::ServeFile {
-                    status,
-                    file_path,
-                    params,
-                } => {
-                    let Some(response) = self
-                        .serve_static_path(
-                            &resolved.origin_id,
-                            config,
-                            &file_path,
-                            status,
-                            params.as_ref(),
-                            cors_headers,
-                        )
-                        .await?
-                    else {
+                let outcome = match apply_edge_payload(
+                    &mut state,
+                    edge_response.status,
+                    edge_response.payload,
+                ) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        edge_span.record("outcome", "invalid_payload");
+                        tracing::error!(edge = %hook.name, "edge payload failed: {error}");
                         let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
                         apply_headers(&mut response.headers, cors_headers.clone());
+                        tracing::Span::current().record("terminal", true);
+                        tracing::Span::current().record("duration_ms", elapsed_ms(start));
                         return Ok(terminal_edge_response(
                             self.finalize_response(response, request),
                         ));
-                    };
-                    return Ok(terminal_edge_response(self.with_edge_headers(
-                        response,
-                        &state,
-                        cors_headers,
-                        request,
-                    )));
-                }
-                EdgePayloadOutcome::RenderTarget { status, params } => {
-                    let target = self.resolve_request_target(config, &request.path);
-                    let Some(response) = self
-                        .serve_static_path(
-                            &resolved.origin_id,
-                            config,
-                            &target,
+                    }
+                };
+                match outcome {
+                    EdgePayloadOutcome::Continue => {
+                        edge_span.record("outcome", "continue");
+                    }
+                    EdgePayloadOutcome::RespondDirect { status, body } => {
+                        edge_span.record("outcome", "respond_direct");
+                        let mut response = RenderResponse {
                             status,
-                            Some(&params),
-                            cors_headers,
-                        )
-                        .await?
-                    else {
-                        let mut response = not_found_text(cors_headers.clone());
-                        response.status = StatusCode::NOT_FOUND;
+                            headers: BTreeMap::new(),
+                            body: Bytes::from(body),
+                        };
+                        apply_headers(&mut response.headers, filtered_headers(&state.headers));
+                        apply_headers(&mut response.headers, cors_headers.clone());
+                        tracing::Span::current().record("terminal", true);
+                        tracing::Span::current().record("duration_ms", elapsed_ms(start));
                         return Ok(terminal_edge_response(
                             self.finalize_response(response, request),
                         ));
-                    };
-                    return Ok(terminal_edge_response(self.with_edge_headers(
-                        response,
-                        &state,
-                        cors_headers,
-                        request,
-                    )));
+                    }
+                    EdgePayloadOutcome::ServeFile {
+                        status,
+                        file_path,
+                        params,
+                    } => {
+                        edge_span.record("outcome", "serve_file");
+                        let Some(response) = self
+                            .serve_static_path(
+                                &resolved.origin_id,
+                                config,
+                                &file_path,
+                                status,
+                                params.as_ref(),
+                                cors_headers,
+                            )
+                            .await?
+                        else {
+                            let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
+                            apply_headers(&mut response.headers, cors_headers.clone());
+                            tracing::Span::current().record("terminal", true);
+                            tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                            return Ok(terminal_edge_response(
+                                self.finalize_response(response, request),
+                            ));
+                        };
+                        tracing::Span::current().record("terminal", true);
+                        tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                        return Ok(terminal_edge_response(self.with_edge_headers(
+                            response,
+                            &state,
+                            cors_headers,
+                            request,
+                        )));
+                    }
+                    EdgePayloadOutcome::RenderTarget { status, params } => {
+                        edge_span.record("outcome", "render_target");
+                        let target = self.resolve_request_target(config, &request.path);
+                        let Some(response) = self
+                            .serve_static_path(
+                                &resolved.origin_id,
+                                config,
+                                &target,
+                                status,
+                                Some(&params),
+                                cors_headers,
+                            )
+                            .await?
+                        else {
+                            let mut response = not_found_text(cors_headers.clone());
+                            response.status = StatusCode::NOT_FOUND;
+                            tracing::Span::current().record("terminal", true);
+                            tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                            return Ok(terminal_edge_response(
+                                self.finalize_response(response, request),
+                            ));
+                        };
+                        tracing::Span::current().record("terminal", true);
+                        tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                        return Ok(terminal_edge_response(self.with_edge_headers(
+                            response,
+                            &state,
+                            cors_headers,
+                            request,
+                        )));
+                    }
                 }
             }
+            tracing::Span::current().record("terminal", false);
+            tracing::Span::current().record("duration_ms", elapsed_ms(start));
+            Ok((None, filtered_headers(&state.headers)))
         }
-        Ok((None, filtered_headers(&state.headers)))
+        .instrument(span)
+        .await
     }
 
     fn with_edge_headers(
@@ -318,19 +459,44 @@ impl RenderGatewayService {
         params: Option<&serde_json::Value>,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<Option<RenderResponse>> {
-        if let Some(response) = self
-            .serve_object(origin_id, path, status, params, cors_headers)
-            .await?
-        {
-            return Ok(Some(response));
+        let start = Instant::now();
+        let span = tracing::info_span!(
+            "rendermesh.static",
+            origin_id,
+            path,
+            has_params = params.is_some(),
+            status = status.as_u16(),
+            hit = tracing::field::Empty,
+            auto_index = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        async move {
+            if let Some(response) = self
+                .serve_object(origin_id, path, status, params, cors_headers)
+                .await?
+            {
+                tracing::Span::current().record("hit", true);
+                tracing::Span::current().record("auto_index", false);
+                tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                return Ok(Some(response));
+            }
+            if config.edge.auto_rewrite_index {
+                let candidate = auto_index_candidate(path);
+                let response = self
+                    .serve_object(origin_id, &candidate, status, params, cors_headers)
+                    .await?;
+                tracing::Span::current().record("hit", response.is_some());
+                tracing::Span::current().record("auto_index", true);
+                tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                return Ok(response);
+            }
+            tracing::Span::current().record("hit", false);
+            tracing::Span::current().record("auto_index", false);
+            tracing::Span::current().record("duration_ms", elapsed_ms(start));
+            Ok(None)
         }
-        if config.edge.auto_rewrite_index {
-            let candidate = auto_index_candidate(path);
-            return self
-                .serve_object(origin_id, &candidate, status, params, cors_headers)
-                .await;
-        }
-        Ok(None)
+        .instrument(span)
+        .await
     }
 
     async fn serve_object(
@@ -341,37 +507,74 @@ impl RenderGatewayService {
         params: Option<&serde_json::Value>,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<Option<RenderResponse>> {
-        let Some(object) = self.safe_read_object(origin_id, path).await? else {
-            return Ok(None);
-        };
-        let mut headers = headers_from_metadata(&object.metadata);
-        apply_headers(&mut headers, cors_headers.clone());
-        let body = match params {
-            Some(params) => match self.template_store.render(origin_id, path, params) {
-                Ok(body) => Bytes::from(body),
-                Err(TemplateStoreError::NotHtml) => {
-                    return Ok(Some(RenderResponse {
-                        status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                        headers,
-                        body: Bytes::new(),
-                    }));
+        let start = Instant::now();
+        let span = tracing::info_span!(
+            "rendermesh.object",
+            origin_id,
+            path,
+            has_params = params.is_some(),
+            hit = tracing::field::Empty,
+            rendered = tracing::field::Empty,
+            duration_ms = tracing::field::Empty
+        );
+        async move {
+            let Some(object) = self.safe_read_object(origin_id, path).await? else {
+                tracing::Span::current().record("hit", false);
+                tracing::Span::current().record("duration_ms", elapsed_ms(start));
+                return Ok(None);
+            };
+            tracing::Span::current().record("hit", true);
+            let mut headers = headers_from_metadata(&object.metadata);
+            apply_headers(&mut headers, cors_headers.clone());
+            let body = match params {
+                Some(params) => match tracing::info_span!(
+                    "rendermesh.template_render",
+                    origin_id,
+                    path,
+                    duration_ms = tracing::field::Empty
+                )
+                .in_scope(|| {
+                    let render_start = Instant::now();
+                    let result = self.template_store.render(origin_id, path, params);
+                    tracing::Span::current().record("duration_ms", elapsed_ms(render_start));
+                    result
+                }) {
+                    Ok(body) => Bytes::from(body),
+                    Err(TemplateStoreError::NotHtml) => {
+                        tracing::Span::current().record("rendered", false);
+                        return Ok(Some(RenderResponse {
+                            status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                            headers,
+                            body: Bytes::new(),
+                        }));
+                    }
+                    Err(error) => {
+                        tracing::Span::current().record("rendered", false);
+                        tracing::error!("render template failed: {error}");
+                        return Ok(Some(RenderResponse {
+                            status: StatusCode::BAD_GATEWAY,
+                            headers,
+                            body: Bytes::new(),
+                        }));
+                    }
+                },
+                None => {
+                    tracing::Span::current().record("rendered", false);
+                    object.body
                 }
-                Err(error) => {
-                    tracing::error!("render template failed: {error}");
-                    return Ok(Some(RenderResponse {
-                        status: StatusCode::BAD_GATEWAY,
-                        headers,
-                        body: Bytes::new(),
-                    }));
-                }
-            },
-            None => object.body,
-        };
-        Ok(Some(RenderResponse {
-            status,
-            headers,
-            body,
-        }))
+            };
+            if params.is_some() {
+                tracing::Span::current().record("rendered", true);
+            }
+            tracing::Span::current().record("duration_ms", elapsed_ms(start));
+            Ok(Some(RenderResponse {
+                status,
+                headers,
+                body,
+            }))
+        }
+        .instrument(span)
+        .await
     }
 
     async fn safe_read_object(&self, origin_id: &str, path: &str) -> Result<Option<LocalObject>> {
@@ -398,41 +601,61 @@ impl RenderGatewayService {
         config: &EdgeConfig,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<Option<RenderResponse>> {
-        match config.missing.action {
-            crate::dto::edge::MissingAction::NotFound => {
-                if let Some(page) = &config.missing.page {
-                    if let Some(mut response) = self
-                        .serve_object(origin_id, page, StatusCode::NOT_FOUND, None, cors_headers)
-                        .await?
-                    {
-                        response.status = StatusCode::NOT_FOUND;
-                        return Ok(Some(response));
+        let start = Instant::now();
+        let span = tracing::info_span!(
+            "rendermesh.missing",
+            origin_id,
+            action = ?config.missing.action,
+            duration_ms = tracing::field::Empty
+        );
+        async move {
+            match config.missing.action {
+                crate::dto::edge::MissingAction::NotFound => {
+                    if let Some(page) = &config.missing.page {
+                        if let Some(mut response) = self
+                            .serve_object(
+                                origin_id,
+                                page,
+                                StatusCode::NOT_FOUND,
+                                None,
+                                cors_headers,
+                            )
+                            .await?
+                        {
+                            response.status = StatusCode::NOT_FOUND;
+                            return Ok(Some(response));
+                        }
                     }
+                    Ok(Some(not_found_text(cors_headers.clone())))
                 }
-                Ok(Some(not_found_text(cors_headers.clone())))
-            }
-            crate::dto::edge::MissingAction::Serve => {
-                let Some(path) = &config.missing.path else {
-                    return Ok(Some(not_found_text(cors_headers.clone())));
-                };
-                self.serve_object(origin_id, path, StatusCode::OK, None, cors_headers)
-                    .await
-            }
-            crate::dto::edge::MissingAction::Redirect => {
-                let status = config
-                    .missing
-                    .status
-                    .map(StatusCode::from_u16)
-                    .transpose()?
-                    .unwrap_or(StatusCode::FOUND);
-                let mut response = RenderResponse::empty(status);
-                if let Some(to) = &config.missing.to {
-                    insert_header(&mut response.headers, "location", to);
+                crate::dto::edge::MissingAction::Serve => {
+                    let Some(path) = &config.missing.path else {
+                        return Ok(Some(not_found_text(cors_headers.clone())));
+                    };
+                    self.serve_object(origin_id, path, StatusCode::OK, None, cors_headers)
+                        .await
                 }
-                apply_headers(&mut response.headers, cors_headers.clone());
-                Ok(Some(response))
+                crate::dto::edge::MissingAction::Redirect => {
+                    let status = config
+                        .missing
+                        .status
+                        .map(StatusCode::from_u16)
+                        .transpose()?
+                        .unwrap_or(StatusCode::FOUND);
+                    let mut response = RenderResponse::empty(status);
+                    if let Some(to) = &config.missing.to {
+                        insert_header(&mut response.headers, "location", to);
+                    }
+                    apply_headers(&mut response.headers, cors_headers.clone());
+                    Ok(Some(response))
+                }
             }
+            .inspect(|_| {
+                tracing::Span::current().record("duration_ms", elapsed_ms(start));
+            })
         }
+        .instrument(span)
+        .await
     }
 
     fn cors_headers(&self, origin_id: &str, request: &RenderRequest) -> BTreeMap<String, String> {
