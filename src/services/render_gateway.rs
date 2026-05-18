@@ -59,10 +59,13 @@ impl RenderGatewayService {
         }
 
         let _cors = &self.cors;
-        let config = self
-            .edge_configs
-            .get(&resolved.origin_id)
-            .expect("edge config exists for resolved origin");
+        let Some(config) = self.edge_configs.get(&resolved.origin_id) else {
+            tracing::error!(
+                origin_id = %resolved.origin_id,
+                "resolved origin is missing edge config"
+            );
+            return Ok(RenderResponse::empty(StatusCode::INTERNAL_SERVER_ERROR));
+        };
         let path = resolve_root_object(config, &request.path);
 
         if let Some(object) = self.mirror.read_object(&resolved.origin_id, &path).await? {
@@ -171,8 +174,47 @@ mod tests {
         assert_eq!(response.status, StatusCode::MISDIRECTED_REQUEST);
     }
 
+    #[tokio::test]
+    async fn resolved_host_missing_edge_config_returns_500() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manifest = test_manifest();
+        let service = RenderGatewayService::new_for_tests(
+            HostResolver::new(&manifest).expect("resolver"),
+            CorsPolicy::from_manifest(&manifest),
+            LocalMirrorRepository::new(temp.path().join("origins")),
+            BTreeMap::new(),
+        );
+
+        let response = service
+            .handle(RenderRequest {
+                method: Method::GET,
+                host: "web.test".to_string(),
+                path: "/".to_string(),
+                query: None,
+                scheme: "https".to_string(),
+                headers: Default::default(),
+                body: bytes::Bytes::new(),
+            })
+            .await
+            .expect("response");
+
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(response.body.is_empty());
+    }
+
     fn test_gateway(root: std::path::PathBuf) -> RenderGatewayService {
-        let manifest = parse_manifest_yaml(
+        let manifest = test_manifest();
+
+        RenderGatewayService::new_for_tests(
+            HostResolver::new(&manifest).expect("resolver"),
+            CorsPolicy::from_manifest(&manifest),
+            LocalMirrorRepository::new(root),
+            [("web".to_string(), default_edge_config())].into(),
+        )
+    }
+
+    fn test_manifest() -> crate::dto::manifest::RenderMeshManifest {
+        parse_manifest_yaml(
             r#"
 version: 1
 runtime:
@@ -191,13 +233,6 @@ hosts:
     origin: web
 "#,
         )
-        .expect("manifest");
-
-        RenderGatewayService::new_for_tests(
-            HostResolver::new(&manifest).expect("resolver"),
-            CorsPolicy::from_manifest(&manifest),
-            LocalMirrorRepository::new(root),
-            [("web".to_string(), default_edge_config())].into(),
-        )
+        .expect("manifest")
     }
 }
