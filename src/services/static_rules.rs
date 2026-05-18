@@ -11,13 +11,13 @@ pub fn find_redirect(
     path: &str,
     query: Option<&str>,
 ) -> Option<RedirectDecision> {
-    let (rule, splat) = config
+    let (rule, matched) = config
         .redirects
         .iter()
-        .filter_map(|rule| match_pattern(&rule.from, path).map(|splat| (rule, splat)))
-        .max_by_key(|(rule, _)| rule.from.len())?;
+        .filter_map(|rule| match_pattern(&rule.from, path).map(|matched| (rule, matched)))
+        .max_by_key(|(_, matched)| matched.rank())?;
 
-    let mut location = apply_splat(&rule.to, splat);
+    let mut location = apply_splat(&rule.to, matched.splat);
     if !location.contains('?') {
         if let Some(query) = query.filter(|value| !value.is_empty()) {
             location.push('?');
@@ -35,9 +35,9 @@ pub fn resolve_rewrite(config: &EdgeConfig, path: &str) -> String {
     config
         .rewrites
         .iter()
-        .filter_map(|rule| match_pattern(&rule.from, path).map(|splat| (rule, splat)))
-        .max_by_key(|(rule, _)| rule.from.len())
-        .map(|(rule, splat)| apply_splat(&rule.to, splat))
+        .filter_map(|rule| match_pattern(&rule.from, path).map(|matched| (rule, matched)))
+        .max_by_key(|(_, matched)| matched.rank())
+        .map(|(rule, matched)| apply_splat(&rule.to, matched.splat))
         .unwrap_or_else(|| path.to_string())
 }
 
@@ -58,13 +58,40 @@ fn apply_splat(target: &str, splat: Option<&str>) -> String {
     target.replace(":splat", splat.unwrap_or_default())
 }
 
-fn match_pattern<'a>(pattern: &str, path: &'a str) -> Option<Option<&'a str>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PatternMatch<'a> {
+    kind: MatchKind,
+    specificity: usize,
+    splat: Option<&'a str>,
+}
+
+impl PatternMatch<'_> {
+    fn rank(&self) -> (MatchKind, usize) {
+        (self.kind, self.specificity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchKind {
+    Wildcard,
+    Exact,
+}
+
+fn match_pattern<'a>(pattern: &str, path: &'a str) -> Option<PatternMatch<'a>> {
     if pattern == path {
-        return Some(None);
+        return Some(PatternMatch {
+            kind: MatchKind::Exact,
+            specificity: pattern.len(),
+            splat: None,
+        });
     }
 
     let prefix = pattern.strip_suffix('*')?;
-    path.strip_prefix(prefix).map(Some)
+    path.strip_prefix(prefix).map(|splat| PatternMatch {
+        kind: MatchKind::Wildcard,
+        specificity: prefix.len(),
+        splat: Some(splat),
+    })
 }
 
 #[cfg(test)]
@@ -122,6 +149,34 @@ redirects:
     }
 
     #[test]
+    fn redirect_exact_beats_wildcard_for_same_path() {
+        let config = parse_edge_config_yaml(
+            r#"
+version: 1
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+missing:
+  action: not_found
+  page: /index.html
+redirects:
+  - from: /docs*
+    to: /wild
+    status: 301
+  - from: /docs
+    to: /exact
+    status: 302
+"#,
+        )
+        .expect("config");
+
+        let redirect = find_redirect(&config, "/docs", None).expect("redirect");
+
+        assert_eq!(redirect.status, 302);
+        assert_eq!(redirect.location, "/exact");
+    }
+
+    #[test]
     fn rewrite_and_root_object_resolution_work() {
         let config = parse_edge_config_yaml(
             r#"
@@ -141,6 +196,29 @@ rewrites:
 
         assert_eq!(resolve_rewrite(&config, "/docs"), "/docs/index.html");
         assert_eq!(resolve_root_object(&config, "/guide/"), "/guide/index.html");
+    }
+
+    #[test]
+    fn rewrite_exact_beats_wildcard_for_same_path() {
+        let config = parse_edge_config_yaml(
+            r#"
+version: 1
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+missing:
+  action: not_found
+  page: /index.html
+rewrites:
+  - from: /docs*
+    to: /wild.html
+  - from: /docs
+    to: /exact.html
+"#,
+        )
+        .expect("config");
+
+        assert_eq!(resolve_rewrite(&config, "/docs"), "/exact.html");
     }
 
     #[test]
