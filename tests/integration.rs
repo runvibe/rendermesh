@@ -1,5 +1,7 @@
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
+    path::Path,
     time::Duration,
 };
 
@@ -10,7 +12,7 @@ use axum::{
     Router,
 };
 use http_body_util::BodyExt;
-use rust_api_template::{
+use rendermesh::{
     config::{
         otel_enabled_from_env, AppConfig, CorsConfig, McpConfig, DEFAULT_BODY_LIMIT_BYTES,
         DEFAULT_MCP_PATH,
@@ -22,6 +24,7 @@ use rust_api_template::{
     state::AppState,
 };
 use serde_json::Value;
+use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -31,6 +34,16 @@ use testcontainers::{
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 use tracing::info_span;
+
+use rendermesh::{
+    repositories::local_mirror::LocalMirrorRepository,
+    services::{
+        cors::CorsPolicy,
+        edge_config::default_edge_config,
+        manifest::{parse_manifest_yaml, HostResolver},
+        render_gateway::RenderGatewayService,
+    },
+};
 
 async fn setup_router() -> Router {
     setup_router_with_mcp(false).await
@@ -49,7 +62,8 @@ async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
         })
         .await;
 
-    let state = AppState::new(DatabaseRepository::new(pool));
+    let render_gateway = test_render_gateway(Path::new("./unused-render-mirror"));
+    let state = AppState::new(DatabaseRepository::new(pool), render_gateway);
     let config = AppConfig {
         database_url,
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -66,6 +80,59 @@ async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
     };
 
     create_router(state, &config)
+}
+
+fn setup_render_router(temp_root: &Path) -> Router {
+    let gateway = test_render_gateway(&temp_root.join("origins"));
+    let pool = PgPoolOptions::new()
+        .connect_lazy("postgres://postgres:postgres@localhost/test")
+        .expect("lazy pool");
+    let state = AppState::new(DatabaseRepository::new(pool), gateway);
+    let config = AppConfig {
+        database_url: "postgres://postgres:postgres@localhost/test".to_string(),
+        host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+        port: 0,
+        cors: CorsConfig::Permissive,
+        body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
+        otel_enabled: false,
+        rendermesh_manifest: "./rendermesh.yaml".to_string(),
+        mcp: McpConfig {
+            enabled: false,
+            path: DEFAULT_MCP_PATH.to_string(),
+            cors: CorsConfig::Permissive,
+        },
+    };
+
+    create_router(state, &config)
+}
+
+fn test_render_gateway(mirror_root: &Path) -> RenderGatewayService {
+    let manifest = parse_manifest_yaml(
+        r#"
+version: 1
+runtime:
+  local_store_dir: ./unused
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: s3
+    bucket: web
+    endpoint_env: WEB_ENDPOINT
+    region_env: WEB_REGION
+    access_key_id_env: WEB_ACCESS_KEY_ID
+    secret_access_key_env: WEB_SECRET_ACCESS_KEY
+hosts:
+  app.test:
+    origin: web
+"#,
+    )
+    .expect("manifest parses");
+    RenderGatewayService::new_for_tests(
+        HostResolver::new(&manifest).expect("resolver builds"),
+        CorsPolicy::from_manifest(&manifest),
+        LocalMirrorRepository::new(mirror_root),
+        BTreeMap::from([("web".to_string(), default_edge_config())]),
+    )
 }
 
 static MIGRATIONS: OnceCell<()> = OnceCell::const_new();
@@ -215,6 +282,57 @@ async fn response_bytes(response: Response) -> bytes::Bytes {
         .await
         .expect("failed to read response body")
         .to_bytes()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn render_route_serves_host_mapped_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let object_dir = temp.path().join("origins/web/assets");
+    tokio::fs::create_dir_all(&object_dir).await.expect("mkdir");
+    tokio::fs::write(object_dir.join("hello.txt"), "hello from mirror")
+        .await
+        .expect("write object");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/assets/hello.txt?cache=1")
+                .header("host", "app.test")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_bytes(response).await;
+    assert_eq!(body, bytes::Bytes::from_static(b"hello from mirror"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn render_route_rejects_unknown_host() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/")
+                .header("host", "unknown.test")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+    let body = response_bytes(response).await;
+    assert!(body.is_empty());
 }
 
 fn mcp_request(method: &str, id: i64, params: Value) -> Request<Body> {

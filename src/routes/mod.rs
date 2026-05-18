@@ -8,6 +8,7 @@ use crate::{config::AppConfig, state::AppState};
 
 mod cors;
 pub mod mcp;
+pub mod render;
 pub mod system;
 
 #[derive(OpenApi)]
@@ -46,5 +47,5 @@ pub fn create_router(state: AppState, config: &AppConfig) -> Router {
         api_router
     };
 
-    router.with_state(state)
+    router.fallback(render::render).with_state(state)
 }
