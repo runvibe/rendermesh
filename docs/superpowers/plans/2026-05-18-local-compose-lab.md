@@ -31,7 +31,7 @@
 - Create: `examples/local/edge-api/package.json`
 - Create: `examples/local/edge-api/server.mjs`
 
-- [x] Define one origin mapped to `local.rendermesh.test`.
+- [x] Define one origin mapped to `test.com`.
 - [x] Point storage env names at MinIO-compatible variables.
 - [x] Configure the bucket edge hook to call `http://127.0.0.1:4010/edge`.
 - [x] Make `/` and `/index.html` render with params.

@@ -16,7 +16,7 @@ origins:
     sync_interval_seconds: 5
 
 hosts:
-  local.rendermesh.test:
+  test.com:
     origin: local_app
-  "*.local.rendermesh.test":
+  "*.test.com":
     origin: local_app

@@ -40,10 +40,10 @@ export OTEL_ENABLED=false
 cargo run
 ```
 
-Use `Host: local.rendermesh.test` for RenderMesh requests:
+Use `Host: test.com` for RenderMesh requests:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/
 ```
 
 ## Flows To Try
@@ -51,14 +51,14 @@ curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/
 Template render through edge params:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/home
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/home
 ```
 
 Static file without template rendering:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/static.html
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/static.html
 ```
 
 The response should still contain the literal `{{title}}` token from `static.html`.
@@ -66,25 +66,25 @@ The response should still contain the literal `{{title}}` token from `static.htm
 Direct edge body:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/direct
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/direct
 ```
 
 Edge-selected file path:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/file
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/file
 ```
 
 Auto index rewrite:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/docs
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/docs
 ```
 
 Redirect:
 
 ```bash
-curl -i -H 'Host: local.rendermesh.test' http://127.0.0.1:3000/legacy
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/legacy
 ```
 
 ## Update The Bucket
