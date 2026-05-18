@@ -69,6 +69,7 @@ pub struct AppConfig {
     pub body_limit_bytes: usize,
     pub otel_enabled: bool,
     pub mcp: McpConfig,
+    pub rendermesh_manifest: String,
 }
 
 impl AppConfig {
@@ -94,6 +95,8 @@ impl AppConfig {
             .unwrap_or(DEFAULT_BODY_LIMIT_BYTES);
         let otel_enabled = otel_enabled_from_env();
         let mcp = McpConfig::from_env();
+        let rendermesh_manifest = std::env::var("RENDERMESH_MANIFEST")
+            .unwrap_or_else(|_| "./rendermesh.yaml".to_string());
 
         Ok(Self {
             database_url,
@@ -103,6 +106,7 @@ impl AppConfig {
             body_limit_bytes,
             otel_enabled,
             mcp,
+            rendermesh_manifest,
         })
     }
 

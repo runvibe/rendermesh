@@ -57,6 +57,7 @@ async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
         cors: CorsConfig::Permissive,
         body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
         otel_enabled: otel_enabled_from_env(),
+        rendermesh_manifest: "./rendermesh.yaml".to_string(),
         mcp: McpConfig {
             enabled: mcp_enabled,
             path: DEFAULT_MCP_PATH.to_string(),
