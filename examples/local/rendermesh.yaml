@@ -1,0 +1,22 @@
+version: 1
+
+runtime:
+  local_store_dir: ./var/rendermesh/local-lab
+  sync_interval_seconds: 5
+
+origins:
+  local_app:
+    type: s3
+    bucket: rendermesh-local
+    endpoint_env: LOCAL_APP_STORAGE_ENDPOINT
+    region_env: LOCAL_APP_STORAGE_REGION
+    access_key_id_env: LOCAL_APP_ACCESS_KEY_ID
+    secret_access_key_env: LOCAL_APP_SECRET_ACCESS_KEY
+    force_path_style_env: LOCAL_APP_FORCE_PATH_STYLE
+    sync_interval_seconds: 5
+
+hosts:
+  local.rendermesh.test:
+    origin: local_app
+  "*.local.rendermesh.test":
+    origin: local_app

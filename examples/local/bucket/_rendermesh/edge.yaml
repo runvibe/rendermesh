@@ -1,0 +1,23 @@
+version: 1
+
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+
+missing:
+  action: not_found
+  page: /index.html
+
+redirects:
+  - from: /legacy
+    to: /static.html
+    status: 302
+
+rewrites:
+  - from: /home
+    to: /index.html
+
+edges:
+  - name: local-lab-edge
+    url: http://127.0.0.1:4010/edge
+    timeout_ms: 800

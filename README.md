@@ -26,6 +26,19 @@ The current MVP keeps the original template health, echo, docs, PostgreSQL, Open
 
 Migrations are managed by SQLx and run on startup from `migrations/`. Swagger UI remains available at `/docs`.
 
+### Local bucket lab
+
+For a full local RenderMesh flow with MinIO, a seeded frontend bucket, and a programmable edge API, use [examples/local/README.md](examples/local/README.md).
+
+The lab lets you test:
+
+- bucket sync from MinIO
+- `/_rendermesh/edge.yaml`
+- edge params rendering `index.html` with Handlebars
+- direct static delivery of `static.html` without templating
+- direct edge body responses
+- redirects, rewrites, and auto-index behavior
+
 ## Global Manifest
 
 `RENDERMESH_MANIFEST` points to the bootstrap YAML file. Bucket connection values stay in environment variables so the same manifest shape can be reused safely.
