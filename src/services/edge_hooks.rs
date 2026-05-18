@@ -54,10 +54,7 @@ pub fn apply_edge_payload(
 }
 
 pub fn validate_edge_file_path(path: &str) -> Result<()> {
-    if !path.starts_with('/')
-        || path.chars().any(char::is_control)
-        || path.split('/').any(|segment| segment == "..")
-    {
+    if !path.starts_with('/') || path.chars().any(char::is_control) || path.contains("..") {
         return Err(anyhow!("invalid file_path {path}"));
     }
 
@@ -145,8 +142,13 @@ mod tests {
     }
 
     #[test]
-    fn validate_edge_file_path_rejects_parent_segments_and_control_chars() {
-        for path in ["/../secret", "/safe/../secret", "/safe/\nsecret"] {
+    fn validate_edge_file_path_rejects_dotdot_and_control_chars() {
+        for path in [
+            "/../secret",
+            "/safe/../secret",
+            "/safe/\nsecret",
+            "/safe/v1..2/index.html",
+        ] {
             let error = validate_edge_file_path(path).expect_err("path is invalid");
 
             assert!(error.to_string().contains("invalid file_path"));
@@ -154,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_edge_file_path_accepts_benign_dotted_names() {
-        validate_edge_file_path("/safe/v1..2/index.html").expect("path is valid");
+    fn validate_edge_file_path_accepts_valid_path_without_dotdot() {
+        validate_edge_file_path("/safe/v1-2/index.html").expect("path is valid");
     }
 }
