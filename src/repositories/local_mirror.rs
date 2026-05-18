@@ -3,6 +3,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 pub const METADATA_DIR_NAME: &str = ".rendermesh-meta";
 
@@ -120,9 +121,13 @@ pub fn normalize_object_path(path: &str) -> Result<String> {
 
 pub fn metadata_sidecar_path(origin_dir: &Path, object_key: &str) -> Result<PathBuf> {
     let normalized = normalize_object_path(object_key)?;
+    let hash = stable_key_hash(&normalized);
+    let shard = &hash[..2];
+
     Ok(origin_dir
         .join(METADATA_DIR_NAME)
-        .join(format!("{}.json", encode_metadata_key(&normalized))))
+        .join(shard)
+        .join(format!("{hash}.json")))
 }
 
 fn validate_origin_id(origin_id: &str) -> Result<()> {
@@ -147,11 +152,15 @@ fn is_reserved_metadata_key(path: &str) -> bool {
         == Some(METADATA_DIR_NAME)
 }
 
-fn encode_metadata_key(key: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(key.len() * 2);
+fn stable_key_hash(key: &str) -> String {
+    encode_hex(&Sha256::digest(key.as_bytes()))
+}
 
-    for byte in key.as_bytes() {
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
         encoded.push(HEX[(byte >> 4) as usize] as char);
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
@@ -237,6 +246,27 @@ mod tests {
             Some("application/json")
         );
         assert_eq!(object.metadata.etag.as_deref(), Some("meta-object"));
+    }
+
+    #[test]
+    fn metadata_sidecar_path_has_bounded_components_for_long_keys() {
+        let root = PathBuf::from("/tmp/origins/web");
+        let long_key = (0..8)
+            .map(|index| format!("segment-{index:02}-{}", "a".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let metadata_path = metadata_sidecar_path(&root, &long_key).expect("metadata path");
+
+        for component in metadata_path.components() {
+            if let Component::Normal(part) = component {
+                assert!(
+                    part.to_string_lossy().len() <= 80,
+                    "component is too long: {}",
+                    part.to_string_lossy().len()
+                );
+            }
+        }
     }
 
     #[tokio::test]

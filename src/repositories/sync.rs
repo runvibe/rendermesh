@@ -79,6 +79,7 @@ impl MirrorSyncService {
         }
 
         remove_deleted_objects(&origin_dir, &remote_keys).await?;
+        remove_orphan_metadata_sidecars(&origin_dir, &remote_keys).await?;
         Ok(SyncReport { downloaded })
     }
 }
@@ -200,6 +201,50 @@ async fn remove_deleted_objects(origin_dir: &Path, remote_keys: &BTreeSet<String
                     })
                 }
             }
+        }
+    }
+
+    Ok(())
+}
+
+async fn remove_orphan_metadata_sidecars(
+    origin_dir: &Path,
+    remote_keys: &BTreeSet<String>,
+) -> Result<()> {
+    let metadata_dir = origin_dir.join(METADATA_DIR_NAME);
+    let mut expected_paths = BTreeSet::new();
+
+    for key in remote_keys {
+        expected_paths.insert(metadata_sidecar_path(origin_dir, key)?);
+    }
+
+    let mut stack = vec![metadata_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("read metadata mirror dir {}", dir.display()))
+            }
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if !file_type.is_file() || expected_paths.contains(&path) {
+                continue;
+            }
+
+            tokio::fs::remove_file(&path)
+                .await
+                .with_context(|| format!("remove orphan metadata sidecar {}", path.display()))?;
         }
     }
 
@@ -426,6 +471,94 @@ mod tests {
 
         assert!(!origin_dir.join("foo.meta.json").exists());
         assert!(!metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn removes_orphan_metadata_sidecars() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let origin_dir = root.join("web");
+        let orphan_path = origin_dir
+            .join(METADATA_DIR_NAME)
+            .join("aa")
+            .join("orphan.json");
+        tokio::fs::create_dir_all(orphan_path.parent().expect("orphan parent"))
+            .await
+            .expect("mkdir orphan metadata");
+        tokio::fs::write(&orphan_path, "{}")
+            .await
+            .expect("write orphan metadata");
+
+        let storage = FakeStorage::default();
+        storage.objects.lock().await.insert(
+            "index.html".to_string(),
+            RemoteObject {
+                key: "index.html".to_string(),
+                body: Bytes::from_static(b"<h1>Hello</h1>"),
+                etag: Some("abc".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            },
+        );
+
+        MirrorSyncService::new(root)
+            .sync_origin("web", &storage)
+            .await
+            .expect("sync succeeds");
+
+        assert!(!orphan_path.exists());
+        assert!(metadata_sidecar_path(&origin_dir, "index.html")
+            .expect("metadata path")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn syncs_and_reads_metadata_for_long_key_with_bounded_sidecar_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let origin_dir = root.join("web");
+        let long_key = (0..8)
+            .map(|index| format!("segment-{index:02}-{}", "a".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("/");
+        let storage = FakeStorage::default();
+        storage.objects.lock().await.insert(
+            long_key.clone(),
+            RemoteObject {
+                key: long_key.clone(),
+                body: Bytes::from_static(b"long key body"),
+                etag: Some("long-etag".to_string()),
+                last_modified: None,
+                content_type: Some("text/plain".to_string()),
+                cache_control: None,
+            },
+        );
+
+        MirrorSyncService::new(root.clone())
+            .sync_origin("web", &storage)
+            .await
+            .expect("sync succeeds");
+
+        let metadata_path = metadata_sidecar_path(&origin_dir, &long_key).expect("metadata path");
+        for component in metadata_path.components() {
+            if let Component::Normal(part) = component {
+                assert!(
+                    part.to_string_lossy().len() <= 80,
+                    "component is too long: {}",
+                    part.to_string_lossy().len()
+                );
+            }
+        }
+
+        let object = LocalMirrorRepository::new(root)
+            .read_object("web", &long_key)
+            .await
+            .expect("read")
+            .expect("object");
+
+        assert_eq!(object.body, Bytes::from_static(b"long key body"));
+        assert_eq!(object.metadata.etag.as_deref(), Some("long-etag"));
     }
 
     #[tokio::test]
