@@ -2,7 +2,6 @@ use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
     path::Path,
-    time::Duration,
 };
 
 use axum::{
@@ -13,11 +12,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use rendermesh::{
-    config::{
-        otel_enabled_from_env, AppConfig, CorsConfig, McpConfig, DEFAULT_BODY_LIMIT_BYTES,
-        DEFAULT_MCP_PATH,
-    },
-    db::{init_pool, run_migrations},
+    config::{AppConfig, CorsConfig, McpConfig, DEFAULT_BODY_LIMIT_BYTES, DEFAULT_MCP_PATH},
     libs::telemetry,
     repositories::database::DatabaseRepository,
     routes::create_router,
@@ -25,12 +20,6 @@ use rendermesh::{
 };
 use serde_json::Value;
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::AsyncRunner,
-    GenericImage, ImageExt,
-};
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 use tracing::info_span;
@@ -50,17 +39,11 @@ async fn setup_router() -> Router {
 }
 
 async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
-    let database_url = database_url().await;
+    let database_url = "postgres://postgres:postgres@localhost/test".to_string();
     init_telemetry().await;
-    let pool = init_pool_with_retry(&database_url).await;
-    let pool_for_migrations = pool.clone();
-    MIGRATIONS
-        .get_or_init(|| async move {
-            run_migrations(&pool_for_migrations)
-                .await
-                .expect("failed to run database migrations");
-        })
-        .await;
+    let pool = PgPoolOptions::new()
+        .connect_lazy(&database_url)
+        .expect("lazy pool");
 
     let render_gateway = test_render_gateway(Path::new("./unused-render-mirror"));
     let state = AppState::new(DatabaseRepository::new(pool), render_gateway);
@@ -70,7 +53,7 @@ async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
         port: 0,
         cors: CorsConfig::Permissive,
         body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
-        otel_enabled: otel_enabled_from_env(),
+        otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
         mcp: McpConfig {
             enabled: mcp_enabled,
@@ -135,37 +118,8 @@ hosts:
     )
 }
 
-static MIGRATIONS: OnceCell<()> = OnceCell::const_new();
-static TEST_DB_URL: OnceCell<String> = OnceCell::const_new();
 static TELEMETRY_GUARD: OnceCell<telemetry::TelemetryGuard> = OnceCell::const_new();
-static OTEL_ENDPOINT: OnceCell<String> = OnceCell::const_new();
 static ENV_LOADED: OnceCell<()> = OnceCell::const_new();
-
-async fn database_url() -> String {
-    TEST_DB_URL
-        .get_or_init(|| async {
-            let image = GenericImage::new("pgvector/pgvector", "pg18")
-                .with_exposed_port(5432.tcp())
-                .with_wait_for(WaitFor::message_on_stdout(
-                    "database system is ready to accept connections",
-                ))
-                .with_env_var("POSTGRES_PASSWORD", "postgres")
-                .with_env_var("POSTGRES_USER", "postgres")
-                .with_env_var("POSTGRES_DB", "postgres");
-            let container = image
-                .start()
-                .await
-                .expect("failed to start postgres container");
-            let container = Box::leak(Box::new(container));
-            let port = container
-                .get_host_port_ipv4(5432)
-                .await
-                .expect("failed to resolve postgres mapped port");
-            format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres")
-        })
-        .await
-        .clone()
-}
 
 async fn response_json(response: Response) -> Value {
     let body = response
@@ -179,64 +133,9 @@ async fn response_json(response: Response) -> Value {
 
 async fn init_telemetry() {
     load_env().await;
-    if !otel_enabled_from_env() {
-        TELEMETRY_GUARD
-            .get_or_init(|| async {
-                telemetry::init_tracing(false).expect("failed to init tracing")
-            })
-            .await;
-        return;
-    }
-
-    let endpoint = otel_endpoint().await;
-    if let Some(endpoint) = endpoint {
-        set_env_if_missing("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc");
-        set_env_if_missing("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint);
-    }
-    set_env_if_missing("OTEL_EXPORTER_OTLP_TIMEOUT", "2000");
-    set_env_if_missing("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "2000");
-    set_env_if_missing("OTEL_TRACES_SAMPLER", "always_on");
-    set_env_if_missing("OTEL_USE_SIMPLE_EXPORTER", "true");
-    set_env_if_missing("OTEL_BSP_SCHEDULE_DELAY", "200");
-    set_env_if_missing(
-        "OTEL_SERVICE_NAME",
-        concat!(env!("CARGO_PKG_NAME"), "-tests"),
-    );
-
     TELEMETRY_GUARD
-        .get_or_init(|| async { telemetry::init_tracing(true).expect("failed to init tracing") })
+        .get_or_init(|| async { telemetry::init_tracing(false).expect("failed to init tracing") })
         .await;
-}
-
-async fn otel_endpoint() -> Option<String> {
-    if std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT").is_ok()
-        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
-    {
-        return None;
-    }
-
-    Some(
-        OTEL_ENDPOINT
-            .get_or_init(|| async {
-                let image = GenericImage::new("jaegertracing/jaeger", "latest")
-                    .with_exposed_port(4317.tcp())
-                    .with_wait_for(WaitFor::seconds(3))
-                    .with_env_var("COLLECTOR_OTLP_ENABLED", "true")
-                    .with_env_var("COLLECTOR_OTLP_GRPC_HOST_PORT", "0.0.0.0:4317");
-                let container = image
-                    .start()
-                    .await
-                    .expect("failed to start jaeger container");
-                let container = Box::leak(Box::new(container));
-                let port = container
-                    .get_host_port_ipv4(4317)
-                    .await
-                    .expect("failed to resolve jaeger mapped port");
-                format!("http://127.0.0.1:{port}")
-            })
-            .await
-            .clone(),
-    )
 }
 
 async fn flush_telemetry() {
@@ -251,28 +150,6 @@ async fn load_env() {
             dotenvy::dotenv().ok();
         })
         .await;
-}
-
-fn set_env_if_missing(key: &str, value: &str) {
-    if std::env::var(key).is_err() {
-        std::env::set_var(key, value);
-    }
-}
-
-async fn init_pool_with_retry(database_url: &str) -> PgPool {
-    let mut attempts = 0;
-    loop {
-        match init_pool(database_url).await {
-            Ok(pool) => return pool,
-            Err(err) => {
-                attempts += 1;
-                if attempts >= 10 {
-                    panic!("failed to initialize database pool after {attempts} attempts: {err}");
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        }
-    }
 }
 
 async fn response_bytes(response: Response) -> bytes::Bytes {
