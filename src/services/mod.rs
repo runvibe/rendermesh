@@ -1,3 +1,4 @@
+pub mod config_format;
 pub mod cors;
 pub mod echo;
 pub mod edge_config;

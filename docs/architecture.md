@@ -28,7 +28,7 @@ Important files:
 
 ## `dto/`
 
-DTOs define request, response, YAML, and edge contracts:
+DTOs define request, response, configuration, and edge contracts:
 
 - Render request and response structs.
 - Global manifest structs.

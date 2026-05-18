@@ -11,7 +11,7 @@ Static hosting is often too rigid for real frontend delivery. Applications may n
 - **Origin**: A named bucket-backed application.
 - **Host mapping**: A global manifest mapping exact or wildcard hosts to origins.
 - **Local mirror**: A local copy of each origin's bucket contents.
-- **Origin edge config**: A `/_rendermesh/edge.yaml` file inside a bucket that defines delivery behavior.
+- **Origin edge config**: A YAML or JSON file inside a bucket that defines delivery behavior.
 - **Edge hook**: An external HTTP endpoint called before static delivery.
 - **Template store**: An in-memory Handlebars registry containing only HTML templates from the mirrored bucket.
 
@@ -39,7 +39,7 @@ The MVP includes:
 - Exact and wildcard host resolution.
 - Local bucket mirroring.
 - Periodic background sync.
-- Per-origin `/_rendermesh/edge.yaml`.
+- Per-origin edge config via `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
 - Redirects, rewrites, root object, auto-index, and missing-file behavior.
 - Global per-origin edge hooks.
 - HTML-only Handlebars templates compiled in memory.

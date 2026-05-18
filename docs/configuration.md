@@ -3,7 +3,7 @@
 RenderMesh has two configuration layers:
 
 - A **global manifest** loaded from `RENDERMESH_MANIFEST`.
-- A per-origin **edge config** loaded from each bucket at `/_rendermesh/edge.yaml`.
+- A per-origin **edge config** loaded from each bucket as YAML or JSON.
 
 This document covers the global manifest and environment variables. See [Origin Edge Config](edge-config.md) for bucket-level behavior.
 
@@ -11,7 +11,7 @@ This document covers the global manifest and environment variables. See [Origin 
 
 Common runtime variables:
 
-- `RENDERMESH_MANIFEST`: Path to the global manifest YAML. Defaults to `./rendermesh.yaml`.
+- `RENDERMESH_MANIFEST`: Path to the global manifest YAML or JSON. Defaults to `./rendermesh.yaml`.
 - `APP_HOST`: Bind host. Defaults to `127.0.0.1`.
 - `APP_PORT`: Bind port. Defaults to `8080`.
 - `APP_BODY_LIMIT_BYTES`: Request body read limit for fallback rendering. Defaults to `1048576`.
@@ -28,6 +28,8 @@ Each origin references storage credentials by environment variable name:
 Truth values for `force_path_style` are `1`, `true`, `yes`, and `on`. False values are `0`, `false`, `no`, and `off`.
 
 ## Global Manifest Example
+
+The global manifest can be written as YAML or JSON. The fields are the same in both formats.
 
 ```yaml
 version: 1

@@ -10,13 +10,19 @@ use crate::{
     },
     services::{
         cors::CorsPolicy,
-        edge_config::{default_edge_config, parse_edge_config_yaml},
+        edge_config::{default_edge_config, parse_edge_config},
         edge_config_store::EdgeConfigStore,
         manifest::{load_manifest, HostResolver},
         render_gateway::RenderGatewayService,
         template_store::TemplateStore,
     },
 };
+
+const EDGE_CONFIG_PATHS: [&str; 3] = [
+    "/_rendermesh/edge.yaml",
+    "/_rendermesh/edge.yml",
+    "/_rendermesh/edge.json",
+];
 
 pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewayService> {
     let manifest = load_manifest(&ManifestRepository::new(), manifest_path).await?;
@@ -134,22 +140,18 @@ async fn load_origin_edge_config(
     origin_id: &str,
     mirror: &LocalMirrorRepository,
 ) -> Result<crate::dto::edge::EdgeConfig> {
-    match mirror
-        .read_object(origin_id, "/_rendermesh/edge.yaml")
-        .await?
-    {
-        Some(object) => {
+    for path in EDGE_CONFIG_PATHS {
+        if let Some(object) = mirror.read_object(origin_id, path).await? {
             let content = String::from_utf8(object.body.to_vec())?;
-            Ok(parse_edge_config_yaml(&content)?)
-        }
-        None => {
-            tracing::warn!(
-                origin = %origin_id,
-                "origin has no /_rendermesh/edge.yaml; using default edge config"
-            );
-            Ok(default_edge_config())
+            return Ok(parse_edge_config(&content)?);
         }
     }
+
+    tracing::warn!(
+        origin = %origin_id,
+        "origin has no edge config file; using default edge config"
+    );
+    Ok(default_edge_config())
 }
 
 fn spawn_background_sync(
@@ -265,6 +267,36 @@ missing:
 
         let config = store.get("web").expect("config refreshed");
         assert_eq!(config.edge.root_object, "/home.html");
+        assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_reads_json_when_yaml_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.json",
+            r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/json.html",
+    "auto_rewrite_index": false
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/json.html"
+  }
+}
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("json config loaded");
+        assert_eq!(config.edge.root_object, "/json.html");
         assert!(!config.edge.auto_rewrite_index);
     }
 

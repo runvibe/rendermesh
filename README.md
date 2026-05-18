@@ -12,7 +12,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - Bucket contents remain the source of frontend files.
 - Hosts map explicitly to origins.
 - CORS is derived from the host map.
-- Edge behavior lives beside each origin in `/_rendermesh/edge.yaml`.
+- Edge behavior lives beside each origin in YAML or JSON config files.
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
@@ -25,7 +25,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 
 - [Overview](docs/overview.md): product concepts, request lifecycle, and MVP scope.
 - [Configuration](docs/configuration.md): global manifest, environment variables, origins, hosts, and bucket credentials.
-- [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, root object, auto-index, redirects, rewrites, and missing-file behavior.
+- [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, local filesystem layout, and refresh behavior.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
@@ -82,7 +82,7 @@ See [examples/local/README.md](examples/local/README.md) for every route in the 
 
 ## Minimal Global Manifest
 
-`RENDERMESH_MANIFEST` points to the global bootstrap YAML. Bucket credentials stay in environment variables so the manifest can be reused safely across environments.
+`RENDERMESH_MANIFEST` points to the global bootstrap config. YAML and JSON are both accepted. Bucket credentials stay in environment variables so the manifest can be reused safely across environments.
 
 ```yaml
 version: 1
@@ -113,7 +113,7 @@ Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdire
 
 ## Minimal Origin Edge Config
 
-Each origin can include `/_rendermesh/edge.yaml` in its bucket:
+Each origin can include `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` in its bucket:
 
 ```yaml
 version: 1
