@@ -103,3 +103,5 @@ docker compose run --rm minio-init
 ```
 
 RenderMesh syncs the local mirror every 5 seconds in this lab. Wait a few seconds and request `/` again.
+
+During each successful sync, RenderMesh recompiles the HTML templates for the origin into memory. Requests with edge `params` render from that in-memory registry; `static.html` is still served directly because the edge API does not send params for that route.

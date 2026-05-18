@@ -4,6 +4,7 @@ use crate::services::cors::CorsPolicy;
 use crate::services::edge_config::{default_edge_config, parse_edge_config_yaml};
 use crate::services::edge_config_store::EdgeConfigStore;
 use crate::services::manifest::{parse_manifest_yaml, HostResolver};
+use crate::services::template_store::TemplateStore;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use wiremock::{
     matchers::{method, path},
@@ -341,7 +342,19 @@ async fn edge_params_renders_target_html() {
         Some(r#"{"content_type":"text/html"}"#),
     )
     .await;
-    let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
+    let template_store = TemplateStore::default();
+    template_store
+        .load_origin_templates(
+            "web",
+            &LocalMirrorRepository::new(temp.path().join("origins")),
+        )
+        .await
+        .expect("templates load");
+    let service = test_gateway_with_edge_url_and_templates(
+        temp.path().join("origins"),
+        &server.uri(),
+        template_store,
+    );
     let response = service
         .handle(test_request(Method::GET, "/"))
         .await
@@ -352,6 +365,56 @@ async fn edge_params_renders_target_html() {
         bytes::Bytes::from_static(b"<h1>Edge Title</h1>")
     );
     assert_header(&response, "x-edge", "params");
+}
+
+#[tokio::test]
+async fn edge_params_render_uses_loaded_template_store() {
+    let server = edge_server(
+        200,
+        serde_json::json!({
+            "params": {"title": "Loaded"}
+        }),
+    )
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(
+        temp.path(),
+        "index.html",
+        "<h1>{{title}} from memory</h1>",
+        Some(r#"{"content_type":"text/html"}"#),
+    )
+    .await;
+    let template_store = TemplateStore::default();
+    template_store
+        .load_origin_templates(
+            "web",
+            &LocalMirrorRepository::new(temp.path().join("origins")),
+        )
+        .await
+        .expect("templates load");
+    write_object(
+        temp.path(),
+        "index.html",
+        "<h1>{{title}} from disk</h1>",
+        Some(r#"{"content_type":"text/html"}"#),
+    )
+    .await;
+    let service = test_gateway_with_edge_url_and_templates(
+        temp.path().join("origins"),
+        &server.uri(),
+        template_store,
+    );
+
+    let response = service
+        .handle(test_request(Method::GET, "/"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"<h1>Loaded from memory</h1>")
+    );
 }
 
 #[tokio::test]
@@ -400,7 +463,15 @@ fn test_gateway_with_edge_url(
     root: std::path::PathBuf,
     edge_base_url: &str,
 ) -> RenderGatewayService {
-    test_gateway_with_config(
+    test_gateway_with_edge_url_and_templates(root, edge_base_url, TemplateStore::default())
+}
+
+fn test_gateway_with_edge_url_and_templates(
+    root: std::path::PathBuf,
+    edge_base_url: &str,
+    template_store: TemplateStore,
+) -> RenderGatewayService {
+    test_gateway_with_config_and_templates(
         root,
         edge_config(&format!(
             r#"edges:
@@ -409,16 +480,26 @@ fn test_gateway_with_edge_url(
     timeout_ms: 500
 "#
         )),
+        template_store,
     )
 }
 fn test_gateway_with_config(root: std::path::PathBuf, config: EdgeConfig) -> RenderGatewayService {
+    test_gateway_with_config_and_templates(root, config, TemplateStore::default())
+}
+
+fn test_gateway_with_config_and_templates(
+    root: std::path::PathBuf,
+    config: EdgeConfig,
+    template_store: TemplateStore,
+) -> RenderGatewayService {
     let manifest = test_manifest();
 
-    RenderGatewayService::new_for_tests(
+    RenderGatewayService::new_for_tests_with_template_store(
         HostResolver::new(&manifest).expect("resolver"),
         CorsPolicy::from_manifest(&manifest),
         LocalMirrorRepository::new(root),
         [("web".to_string(), config)].into(),
+        template_store,
     )
 }
 fn test_request(method: Method, path: &str) -> RenderRequest {

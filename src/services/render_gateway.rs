@@ -16,12 +16,10 @@ use crate::{
     services::{
         cors::CorsPolicy,
         edge_config_store::{EdgeConfigStore, EdgeConfigStoreError},
-        edge_hooks::{
-            apply_edge_payload, render_html_template, EdgeChainState, EdgePayloadOutcome,
-            RenderTemplateError,
-        },
+        edge_hooks::{apply_edge_payload, EdgeChainState, EdgePayloadOutcome},
         manifest::{HostResolver, ResolvedHost},
         static_rules::{auto_index_candidate, find_redirect, resolve_rewrite, resolve_root_object},
+        template_store::{TemplateStore, TemplateStoreError},
     },
 };
 
@@ -31,6 +29,7 @@ pub struct RenderGatewayService {
     cors: Arc<CorsPolicy>,
     mirror: LocalMirrorRepository,
     edge_configs: EdgeConfigStore,
+    template_store: TemplateStore,
     edge_http: EdgeHttpRepository,
 }
 
@@ -43,12 +42,30 @@ impl RenderGatewayService {
         mirror: LocalMirrorRepository,
         edge_configs: BTreeMap<String, EdgeConfig>,
     ) -> Self {
-        Self::new_with_edge_config_store(
+        Self::new_with_stores(
             resolver,
             cors,
             mirror,
             EdgeConfigStore::from_configs(edge_configs),
+            TemplateStore::default(),
         )
+    }
+
+    pub fn new_with_stores(
+        resolver: HostResolver,
+        cors: CorsPolicy,
+        mirror: LocalMirrorRepository,
+        edge_configs: EdgeConfigStore,
+        template_store: TemplateStore,
+    ) -> Self {
+        Self {
+            resolver: Arc::new(resolver),
+            cors: Arc::new(cors),
+            mirror,
+            edge_configs,
+            template_store,
+            edge_http: EdgeHttpRepository::new(),
+        }
     }
 
     pub fn new_with_edge_config_store(
@@ -57,13 +74,13 @@ impl RenderGatewayService {
         mirror: LocalMirrorRepository,
         edge_configs: EdgeConfigStore,
     ) -> Self {
-        Self {
-            resolver: Arc::new(resolver),
-            cors: Arc::new(cors),
+        Self::new_with_stores(
+            resolver,
+            cors,
             mirror,
             edge_configs,
-            edge_http: EdgeHttpRepository::new(),
-        }
+            TemplateStore::default(),
+        )
     }
 
     pub fn new_for_tests(
@@ -73,6 +90,22 @@ impl RenderGatewayService {
         edge_configs: BTreeMap<String, EdgeConfig>,
     ) -> Self {
         Self::new(resolver, cors, mirror, edge_configs)
+    }
+
+    pub fn new_for_tests_with_template_store(
+        resolver: HostResolver,
+        cors: CorsPolicy,
+        mirror: LocalMirrorRepository,
+        edge_configs: BTreeMap<String, EdgeConfig>,
+        template_store: TemplateStore,
+    ) -> Self {
+        Self::new_with_stores(
+            resolver,
+            cors,
+            mirror,
+            EdgeConfigStore::from_configs(edge_configs),
+            template_store,
+        )
     }
 
     pub async fn handle(&self, request: RenderRequest) -> Result<RenderResponse> {
@@ -314,9 +347,9 @@ impl RenderGatewayService {
         let mut headers = headers_from_metadata(&object.metadata);
         apply_headers(&mut headers, cors_headers.clone());
         let body = match params {
-            Some(params) => match render_object_template(path, &object, params) {
+            Some(params) => match self.template_store.render(origin_id, path, params) {
                 Ok(body) => Bytes::from(body),
-                Err(RenderTemplateError::UnsupportedMediaType) => {
+                Err(TemplateStoreError::NotHtml) => {
                     return Ok(Some(RenderResponse {
                         status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
                         headers,
@@ -487,15 +520,6 @@ fn headers_from_metadata(metadata: &ObjectMetadata) -> BTreeMap<String, String> 
         insert_header(&mut headers, "last-modified", last_modified);
     }
     headers
-}
-
-fn render_object_template(
-    path: &str,
-    object: &LocalObject,
-    params: &serde_json::Value,
-) -> std::result::Result<String, RenderTemplateError> {
-    let body = String::from_utf8_lossy(&object.body);
-    render_html_template(path, object.metadata.content_type.as_deref(), &body, params)
 }
 
 fn not_found_text(cors_headers: BTreeMap<String, String>) -> RenderResponse {

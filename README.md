@@ -116,6 +116,7 @@ The edge API response status becomes the client status for terminal edge respons
 - `{ "headers": { "x-edge": "yes" } }` adds safe response headers.
 
 Templates are rendered only when `params` is present, and only for HTML.
+HTML templates are compiled into an in-memory Handlebars registry after bucket sync and refreshed after successful background syncs. Non-HTML files are never compiled as templates; when served without `params`, HTML files are returned directly from the mirror without rendering.
 
 ## CORS
 

@@ -8,3 +8,4 @@ pub mod manifest;
 pub mod render_gateway;
 pub mod startup;
 pub mod static_rules;
+pub mod template_store;
