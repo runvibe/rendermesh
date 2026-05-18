@@ -1,0 +1,57 @@
+[package]
+name = "rust-api-template"
+version = "0.1.0"
+edition = "2021"
+authors = ["Philippe Assis <codephilippe@gmail.com>"]
+
+[dependencies]
+anyhow = "1.0.102"
+axum = { version = "0.8.8", features = ["macros"] }
+chrono = { version = "0.4.44", features = ["serde"] }
+dotenvy = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.149"
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "macros",
+    "migrate",
+] }
+thiserror = "2.0.18"
+tokio = { version = "1.50.0", features = [
+    "macros",
+    "rt-multi-thread",
+    "process",
+    "io-util",
+    "io-std",
+] }
+tower-http = { version = "0.6.8", features = ["cors", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = "0.31"
+opentelemetry-otlp = { version = "0.31", default-features = false, features = [
+    "grpc-tonic",
+    "http-proto",
+    "reqwest-client",
+    "trace",
+] }
+opentelemetry_sdk = { version = "0.31", features = ["trace"] }
+axum-tracing-opentelemetry = { version = "0.33.0", features = [
+    "tracing_level_info",
+] }
+tracing-opentelemetry = "0.32"
+uuid = { version = "1.22.0", features = ["serde", "v4"] }
+base64 = "0.22"
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+utoipa-axum = "0.2"
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
+bytes = "1.11.1"
+rmcp = { version = "1.1.1", features = ["transport-streamable-http-server"] }
+schemars = "1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5.3", features = ["util"] }
+testcontainers = "0.27.1"

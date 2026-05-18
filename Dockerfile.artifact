@@ -1,0 +1,21 @@
+# Runtime-only image that expects a prebuilt binary to be present in the build context.
+# The GitHub Actions workflow builds the binary for each architecture and places it under
+# artifacts/<bin-name>/<arch>/ before invoking this Dockerfile.
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# TARGETARCH is provided by buildx (e.g. amd64, arm64)
+ARG TARGETARCH
+ARG BIN_NAME=rust-api-template
+ENV BIN_NAME=${BIN_NAME}
+COPY ./artifacts/${BIN_NAME}/${TARGETARCH}/${BIN_NAME} /app/${BIN_NAME}
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "./${BIN_NAME}"]

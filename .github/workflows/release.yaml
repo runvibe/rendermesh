@@ -1,0 +1,165 @@
+name: Api Release Docker Image (Artifact Build)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/**"
+      - "Cargo.*"
+      - "Dockerfile.artifact"
+      - ".github/workflows/release.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-push:
+    name: Build binary per arch and push multi-platform image
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            platform: linux/arm64
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve binary name from Cargo.toml
+        id: crate
+        run: |
+          bin_name=$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ -z "$bin_name" ]; then
+            echo "failed to resolve crate name from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "bin_name=$bin_name" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if ! command -v cross >/dev/null 2>&1; then
+            cargo install cross --locked
+          fi
+
+      - name: Set up QEMU (for cross-compiling and image assembly)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/${{ matrix.target }}
+          key: ${{ steps.crate.outputs.bin_name }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary (cross)
+        run: |
+          cross build --release --target ${{ matrix.target }} -p ${{ steps.crate.outputs.bin_name }}
+
+      - name: Prepare artifact directory
+        run: |
+          mkdir -p artifacts/${{ steps.crate.outputs.bin_name }}/${{ matrix.arch }}
+          cp target/${{ matrix.target }}/release/${{ steps.crate.outputs.bin_name }} artifacts/${{ steps.crate.outputs.bin_name }}/${{ matrix.arch }}/${{ steps.crate.outputs.bin_name }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ steps.crate.outputs.bin_name }}
+          tags: |
+            type=raw,value=latest-${{ matrix.arch }}
+            type=raw,value=${{ github.sha }}-${{ matrix.arch }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image for ${{ matrix.platform }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile.artifact
+
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TARGETARCH=${{ matrix.arch }}
+            BIN_NAME=${{ steps.crate.outputs.bin_name }}
+          cache-from: type=gha,scope=${{ steps.crate.outputs.bin_name }}-artifact-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ steps.crate.outputs.bin_name }}-artifact-${{ matrix.arch }}
+
+  manifest:
+    name: Create multi-arch manifest
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve binary name from Cargo.toml
+        id: crate
+        run: |
+          bin_name=$(sed -n 's/^name = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          if [ -z "$bin_name" ]; then
+            echo "failed to resolve crate name from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "bin_name=$bin_name" >> "$GITHUB_OUTPUT"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ steps.crate.outputs.bin_name }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ github.sha }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and push manifest list
+        run: |
+          latest_tag=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          sha_tag=$(echo "${{ steps.meta.outputs.tags }}" | sed -n '2p')
+          docker buildx imagetools create -t "$latest_tag" -t "$sha_tag" \
+            "${latest_tag}-amd64" "${latest_tag}-arm64" \
+            "${sha_tag}-amd64" "${sha_tag}-arm64"
