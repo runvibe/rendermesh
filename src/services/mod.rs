@@ -1,2 +1,11 @@
+pub mod cors;
 pub mod echo;
+pub mod edge_config;
+pub mod edge_config_store;
+pub mod edge_hooks;
 pub mod health;
+pub mod manifest;
+pub mod render_gateway;
+pub mod startup;
+pub mod static_rules;
+pub mod template_store;

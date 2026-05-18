@@ -1,128 +1,185 @@
-# rust-api-template
+# RenderMesh
 
-Starter project for building APIs with Axum, PostgreSQL, and OpenTelemetry. It exposes:
+RenderMesh is a Rust edge gateway for frontend applications served from S3/R2-compatible buckets.
+It sits between users, frontend assets, and programmable rendering middleware, then routes requests by host, mirrors bucket contents locally, applies edge rules, calls HTTP edge hooks, renders HTML templates when requested, and serves the final response with low latency.
 
-- `/health` as a liveness endpoint that returns `200 OK` with a JSON status payload.
-- `/echo` to reflect the incoming request across all HTTP verbs with tracing spans per method when OTEL is enabled.
-- `/mcp` as an optional MCP Streamable HTTP endpoint for `health_check` and `echo_request` tools when enabled.
+## Motivation
 
-## Template Bootstrap
+Modern frontend delivery often needs more than static file hosting. Teams need host-based routing, bucket-backed deployments, intelligent fallbacks, redirects, rewrites, HTML customization, observability, and programmable request-time decisions without coupling every frontend application to a specific infrastructure provider.
 
-After creating a new repository from this template, run:
+RenderMesh exists to provide that middle layer. The goal is to keep frontend artifacts portable in buckets while moving delivery concerns into a fast Rust gateway:
 
-- `./scripts/init-template.sh`
+- Bucket contents remain the source of frontend files.
+- Hosts map explicitly to origins.
+- CORS is derived from the host map.
+- Edge behavior lives beside each origin in `/_rendermesh/edge.yaml`.
+- External edge APIs can influence rendering through a stable HTTP contract.
+- HTML templates are compiled in memory and rendered only when edge params are returned.
+- OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
-The script uses the current repository directory name as the new Cargo package/bin name, updates the main hardcoded references (`Cargo.toml`, Rust imports, README, `.env.example`, and `Dockerfile.artifact`), then runs `cargo build` and `cargo test`.
+## Project Status
 
-If you want to override the detected name, pass it explicitly:
+This repository contains the RenderMesh MVP. It intentionally does not include PostgreSQL, MCP, OpenAPI, or Swagger UI. The current runtime focuses on the static edge gateway, local bucket mirroring, edge configuration, edge hooks, HTML-only template rendering, and OpenTelemetry.
 
-- `./scripts/init-template.sh my-new-api`
+## Summary
 
-## Getting Started
+- [Overview](docs/overview.md): product concepts, request lifecycle, and MVP scope.
+- [Configuration](docs/configuration.md): global manifest, environment variables, origins, hosts, and bucket credentials.
+- [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, root object, auto-index, redirects, rewrites, and missing-file behavior.
+- [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
+- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, local filesystem layout, and refresh behavior.
+- [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
+- [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
+- [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.
+- [Release](docs/release.md): GitHub Actions release workflow, multi-arch Docker image, and `Dockerfile.artifact`.
+- [Architecture](docs/architecture.md): code layers, module responsibilities, and request flow.
+- [Local Example](examples/local/README.md): runnable MinIO + edge API lab using `test.com`.
 
-### Prerequisites
+## Quick Start
 
-- Rust toolchain (stable).
-- PostgreSQL access. You can use the included Docker Compose if you want a local DB.
+The fastest way to try RenderMesh locally is the local bucket lab:
 
-### Quick start
-
-1. Start a database (optional example using Compose):
-   - `docker compose up -d postgres jaeger`
-   - If you are upgrading from an older Postgres image and see a volume layout error, recreate the Postgres volume once:
-   - `docker compose down -v`
-   - `docker compose up -d postgres jaeger`
-2. Set `DATABASE_URL` (example for the Compose service):
-   - `export DATABASE_URL=postgres://postgres:postgres@localhost:5453/postgres`
-3. Optionally set:
-   - `APP_HOST` and `APP_PORT` (defaults: `127.0.0.1:8080`).
-   - `APP_CORS_ALLOW_ORIGINS` (comma-separated or `*`) and `APP_BODY_LIMIT_BYTES`.
-   - `OTEL_ENABLED=false` to disable OpenTelemetry export and HTTP tracing middleware while keeping structured logs.
-   - `MCP_ENABLED=true` to expose the MCP endpoint.
-   - `MCP_PATH=/mcp` to change the MCP path.
-   - `MCP_ALLOWED_ORIGINS=*` to keep the MCP endpoint fully open, or provide a comma-separated allowlist if you want to restrict it.
-4. Run:
-   - `cargo run`
-
-Migrations are managed by SQLx and executed on startup from `migrations/`.
-Swagger UI is available at `/docs` with the generated OpenAPI contract.
-
-### MCP HTTP
-
-This template can expose an MCP server over Streamable HTTP in stateless JSON mode.
-
-- It is disabled by default and only mounts when `MCP_ENABLED=true`.
-- The MCP endpoint is intentionally not included in `/openapi.json`.
-- CORS is permissive by default for both the REST API and MCP. Set `APP_CORS_ALLOW_ORIGINS` or `MCP_ALLOWED_ORIGINS` only if you want to restrict them.
-
-The first version exposes two tools:
-
-- `health_check` returns the service status and version.
-- `echo_request` mirrors `method`, `path`, `headers`, and `body` from the tool input.
-- When MCP is enabled, startup logs include the MCP endpoint URL.
-
-To test with the inspector:
-
-1. Start the API with MCP enabled:
-   - `MCP_ENABLED=true cargo run`
-2. Launch the inspector:
-   - `npx @modelcontextprotocol/inspector`
-3. Connect using Streamable HTTP:
-   - `http://127.0.0.1:8080/mcp`
-
-Current limitations:
-
-- no resources or prompts
-- no bearer auth
-- no SSE/session mode; `GET /mcp` returns `405 Method Not Allowed`
-
-### Artifact image
-
-`Dockerfile.artifact` expects a prebuilt binary in `artifacts/<bin-name>/<arch>/` and accepts `BIN_NAME` as a build argument. Example:
-
-`docker build -f Dockerfile.artifact --build-arg TARGETARCH=amd64 --build-arg BIN_NAME=rust-api-template .`
-
-### SQLx note
-
-The SQLx query macros use the database schema at compile time. Make sure `DATABASE_URL` is set when building. If you prefer offline builds, run `cargo sqlx prepare` and set `SQLX_OFFLINE=true`.
-
-### Testing
-
-- Unit tests: `cargo test`
-- Integration tests: `cargo test --test integration`
-  - Requires Docker; tests spin up `pgvector/pgvector:pg18` and, unless `OTEL_ENABLED=false`, a Jaeger collector via testcontainers.
-
-## Architecture
-
-This template is organized around four main layers:
-
-- `routes/`: transport and protocol adapters for HTTP and MCP
-- `services/`: business rules and use-case orchestration
-- `repositories/`: persistence and external integration adapters
-- `dto/`: request/response contracts, validation, and data transformation structs
-
-Preferred flow:
-
-- `route -> dto -> service -> repository -> service -> dto -> route`
-
-Guidelines:
-
-- keep HTTP and MCP details inside `routes/`
-- keep business decisions inside `services/`
-- keep SQLx, queues, and external API clients inside `repositories/`
-- keep payload contracts and transformation structs inside `dto/`
-- let `AppState` carry concrete repositories instead of exposing raw driver clients when possible
-
-## Project Layout
-
-```
-src/
-  config.rs         # environment loading
-  db.rs             # connection pool + migrations
-  dto/              # request/response contracts and shared transport payloads
-  repositories/     # DB, queue, cache, and external integration adapters
-  routes/           # HTTP and MCP transport handlers plus wiring
-  services/         # business rules and use-case orchestration
+```bash
+docker compose up -d jaeger minio edge-api
+docker compose run --rm minio-init
 ```
 
-Adjust the repositories and services to fit your application, then expand the router with new modules as needed.
+Run the gateway:
+
+```bash
+export RENDERMESH_MANIFEST=./examples/local/rendermesh.yaml
+export LOCAL_APP_STORAGE_ENDPOINT=http://127.0.0.1:9000
+export LOCAL_APP_STORAGE_REGION=us-east-1
+export LOCAL_APP_ACCESS_KEY_ID=rendermesh
+export LOCAL_APP_SECRET_ACCESS_KEY=rendermesh-secret
+export LOCAL_APP_FORCE_PATH_STYLE=true
+export APP_HOST=127.0.0.1
+export APP_PORT=3000
+export OTEL_ENABLED=false
+
+cargo run
+```
+
+Test with curl:
+
+```bash
+curl -i -H 'Host: test.com' http://127.0.0.1:3000/
+```
+
+For browser testing, add this entry to `/etc/hosts`:
+
+```text
+127.0.0.1 test.com
+```
+
+Then open:
+
+```text
+http://test.com:3000/
+```
+
+See [examples/local/README.md](examples/local/README.md) for every route in the lab.
+
+## Minimal Global Manifest
+
+`RENDERMESH_MANIFEST` points to the global bootstrap YAML. Bucket credentials stay in environment variables so the manifest can be reused safely across environments.
+
+```yaml
+version: 1
+
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+
+origins:
+  my_app:
+    type: s3
+    bucket: bucket_my_app_123
+    endpoint_env: MY_APP_STORAGE_ENDPOINT
+    region_env: MY_APP_STORAGE_REGION
+    access_key_id_env: MY_APP_ACCESS_KEY_ID
+    secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
+    force_path_style_env: MY_APP_FORCE_PATH_STYLE
+    sync_interval_seconds: 30
+
+hosts:
+  myapp.com:
+    origin: my_app
+  "*.myapp.com":
+    origin: my_app
+```
+
+Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
+
+## Minimal Origin Edge Config
+
+Each origin can include `/_rendermesh/edge.yaml` in its bucket:
+
+```yaml
+version: 1
+
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+
+missing:
+  action: not_found
+  page: /index.html
+```
+
+If this file is missing, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+
+## Edge Hook Contract
+
+When an origin defines edge hooks, RenderMesh sends a `POST` request to the configured hook URL:
+
+```json
+{
+  "context": {
+    "bucket": "bucket_my_app_123",
+    "ip": "203.0.113.10",
+    "origin": "my_app"
+  },
+  "request": {
+    "url": "https://myapp.com/path?query=1",
+    "method": "GET",
+    "headers": {},
+    "body": ""
+  }
+}
+```
+
+The edge response status code becomes the client status for terminal edge responses. The edge response payload can return direct bodies, response headers, params for HTML template rendering, or a specific file path to serve from the origin mirror. See [Edge Hooks](docs/edge-hooks.md).
+
+## Testing
+
+Run the full suite:
+
+```bash
+cargo test
+```
+
+Run only integration tests:
+
+```bash
+cargo test --test integration
+```
+
+The local lab also validates the full bucket and edge flow with MinIO and a small Node.js edge API. See [Testing](docs/testing.md).
+
+## Repository Layout
+
+```text
+src/routes/        HTTP transport wiring
+src/dto/           request, response, manifest, and edge contracts
+src/services/      business rules and orchestration
+src/repositories/  local mirror, S3/R2, sync, and HTTP adapters
+examples/local/    runnable local bucket lab
+docs/              project documentation
+```
+
+Preferred application flow:
+
+```text
+route -> dto -> service -> repository -> service -> dto -> route
+```

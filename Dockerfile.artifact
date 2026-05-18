@@ -12,7 +12,7 @@ WORKDIR /app
 
 # TARGETARCH is provided by buildx (e.g. amd64, arm64)
 ARG TARGETARCH
-ARG BIN_NAME=rust-api-template
+ARG BIN_NAME=rendermesh
 ENV BIN_NAME=${BIN_NAME}
 COPY ./artifacts/${BIN_NAME}/${TARGETARCH}/${BIN_NAME} /app/${BIN_NAME}
 

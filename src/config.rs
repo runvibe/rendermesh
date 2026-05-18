@@ -1,9 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 pub const DEFAULT_BODY_LIMIT_BYTES: usize = 1_048_576;
-pub const DEFAULT_MCP_PATH: &str = "/mcp";
 
 #[derive(Clone, Debug)]
 pub enum CorsConfig {
@@ -27,55 +26,17 @@ impl CorsConfig {
 }
 
 #[derive(Clone, Debug)]
-pub struct McpConfig {
-    pub enabled: bool,
-    pub path: String,
-    pub cors: CorsConfig,
-}
-
-impl McpConfig {
-    fn from_env() -> Self {
-        let enabled = parse_env_bool("MCP_ENABLED").unwrap_or(false);
-        let path = std::env::var("MCP_PATH")
-            .ok()
-            .map(|value| normalize_path(&value))
-            .unwrap_or_else(|| DEFAULT_MCP_PATH.to_string());
-        let cors = match std::env::var("MCP_ALLOWED_ORIGINS") {
-            Ok(value) => {
-                let origins = parse_csv_env(&value);
-                if origins.iter().any(|origin| origin == "*") {
-                    CorsConfig::Permissive
-                } else {
-                    CorsConfig::Restricted(origins)
-                }
-            }
-            Err(_) => CorsConfig::Permissive,
-        };
-
-        Self {
-            enabled,
-            path,
-            cors,
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub struct AppConfig {
-    pub database_url: String,
     pub host: IpAddr,
     pub port: u16,
     pub cors: CorsConfig,
     pub body_limit_bytes: usize,
     pub otel_enabled: bool,
-    pub mcp: McpConfig,
+    pub rendermesh_manifest: String,
 }
 
 impl AppConfig {
     pub fn from_env() -> Result<Self> {
-        let database_url = std::env::var("DATABASE_URL")
-            .map_err(|_| anyhow!("DATABASE_URL environment variable is required"))?;
-
         let host = std::env::var("APP_HOST")
             .ok()
             .and_then(|value| value.parse::<IpAddr>().ok())
@@ -93,27 +54,21 @@ impl AppConfig {
             .filter(|value| *value > 0)
             .unwrap_or(DEFAULT_BODY_LIMIT_BYTES);
         let otel_enabled = otel_enabled_from_env();
-        let mcp = McpConfig::from_env();
+        let rendermesh_manifest = std::env::var("RENDERMESH_MANIFEST")
+            .unwrap_or_else(|_| "./rendermesh.yaml".to_string());
 
         Ok(Self {
-            database_url,
             host,
             port,
             cors,
             body_limit_bytes,
             otel_enabled,
-            mcp,
+            rendermesh_manifest,
         })
     }
 
     pub fn listen_addr(&self) -> Result<SocketAddr> {
         Ok(SocketAddr::new(self.host, self.port))
-    }
-
-    pub fn mcp_endpoint_url(&self) -> Option<String> {
-        self.mcp
-            .enabled
-            .then(|| format!("http://{}:{}{}", self.host, self.port, self.mcp.path))
     }
 }
 
@@ -140,30 +95,11 @@ fn parse_csv_env(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn normalize_path(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return DEFAULT_MCP_PATH.to_string();
-    }
-
-    let with_prefix = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{trimmed}")
-    };
-
-    if with_prefix.len() > 1 && with_prefix.ends_with('/') {
-        with_prefix.trim_end_matches('/').to_string()
-    } else {
-        with_prefix
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::{LazyLock, Mutex};
 
-    use super::{otel_enabled_from_env, AppConfig, CorsConfig, DEFAULT_MCP_PATH};
+    use super::{otel_enabled_from_env, AppConfig};
 
     static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -192,72 +128,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_defaults_are_applied() {
+    fn app_config_does_not_require_external_database_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
-        let _database_url = EnvVarGuard::set("DATABASE_URL", "postgres://localhost/template");
-        let _mcp_enabled = EnvVarGuard::unset("MCP_ENABLED");
-        let _mcp_path = EnvVarGuard::unset("MCP_PATH");
-        let _mcp_allowed_origins = EnvVarGuard::unset("MCP_ALLOWED_ORIGINS");
-        let _app_host = EnvVarGuard::unset("APP_HOST");
+        let _database_url = EnvVarGuard::unset("DATABASE_URL");
 
-        let config = AppConfig::from_env().expect("config should parse");
+        let config = AppConfig::from_env().expect("config should parse without a database");
 
-        assert!(!config.mcp.enabled);
-        assert_eq!(config.mcp.path, DEFAULT_MCP_PATH);
-        assert!(matches!(config.mcp.cors, CorsConfig::Permissive));
-    }
-
-    #[test]
-    fn mcp_path_and_allowed_origins_are_normalized() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let _database_url = EnvVarGuard::set("DATABASE_URL", "postgres://localhost/template");
-        let _mcp_path = EnvVarGuard::set("MCP_PATH", " custom/mcp/ ");
-        let _mcp_allowed_origins = EnvVarGuard::set(
-            "MCP_ALLOWED_ORIGINS",
-            " http://localhost:6274 , http://127.0.0.1:6274 ",
-        );
-
-        let config = AppConfig::from_env().expect("config should parse");
-
-        assert_eq!(config.mcp.path, "/custom/mcp");
-        match config.mcp.cors {
-            CorsConfig::Restricted(origins) => assert_eq!(
-                origins,
-                vec![
-                    "http://localhost:6274".to_string(),
-                    "http://127.0.0.1:6274".to_string()
-                ]
-            ),
-            CorsConfig::Permissive => panic!("expected restricted MCP origins"),
-        }
-    }
-
-    #[test]
-    fn mcp_wildcard_enables_permissive_cors() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let _database_url = EnvVarGuard::set("DATABASE_URL", "postgres://localhost/template");
-        let _mcp_allowed_origins = EnvVarGuard::set("MCP_ALLOWED_ORIGINS", "*");
-
-        let config = AppConfig::from_env().expect("config should parse");
-
-        assert!(matches!(config.mcp.cors, CorsConfig::Permissive));
-    }
-
-    #[test]
-    fn mcp_endpoint_url_is_reported_when_enabled() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
-        let _database_url = EnvVarGuard::set("DATABASE_URL", "postgres://localhost/template");
-        let _mcp_enabled = EnvVarGuard::set("MCP_ENABLED", "true");
-        let _app_host = EnvVarGuard::set("APP_HOST", "0.0.0.0");
-        let _app_port = EnvVarGuard::set("APP_PORT", "3000");
-        let _mcp_path = EnvVarGuard::set("MCP_PATH", "/custom-mcp");
-
-        let config = AppConfig::from_env().expect("config should parse");
-
-        assert_eq!(
-            config.mcp_endpoint_url().as_deref(),
-            Some("http://0.0.0.0:3000/custom-mcp")
-        );
+        assert_eq!(config.rendermesh_manifest, "./rendermesh.yaml");
     }
 
     struct EnvVarGuard {
