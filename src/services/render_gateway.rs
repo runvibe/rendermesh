@@ -204,9 +204,12 @@ impl RenderGatewayService {
                             self.finalize_response(response, request),
                         ));
                     };
-                    return Ok(terminal_edge_response(
-                        self.with_edge_headers(response, &state, request),
-                    ));
+                    return Ok(terminal_edge_response(self.with_edge_headers(
+                        response,
+                        &state,
+                        cors_headers,
+                        request,
+                    )));
                 }
                 EdgePayloadOutcome::RenderTarget { status, params } => {
                     let target = self.resolve_request_target(config, &request.path);
@@ -226,9 +229,12 @@ impl RenderGatewayService {
                             self.finalize_response(response, request),
                         ));
                     };
-                    return Ok(terminal_edge_response(
-                        self.with_edge_headers(response, &state, request),
-                    ));
+                    return Ok(terminal_edge_response(self.with_edge_headers(
+                        response,
+                        &state,
+                        cors_headers,
+                        request,
+                    )));
                 }
             }
         }
@@ -239,9 +245,11 @@ impl RenderGatewayService {
         &self,
         mut response: RenderResponse,
         state: &EdgeChainState,
+        cors_headers: &BTreeMap<String, String>,
         request: &RenderRequest,
     ) -> RenderResponse {
         apply_headers(&mut response.headers, filtered_headers(&state.headers));
+        apply_headers(&mut response.headers, cors_headers.clone());
         self.finalize_response(response, request)
     }
 
@@ -637,7 +645,6 @@ mod tests {
 "#,
             ),
         );
-
         let response = service
             .handle(RenderRequest {
                 query: Some("a=1".to_string()),
@@ -663,7 +670,6 @@ mod tests {
 "#,
             ),
         );
-
         let response = service
             .handle(test_request(Method::GET, "/app"))
             .await
@@ -775,7 +781,6 @@ mod tests {
         .await;
         let temp = tempfile::tempdir().expect("tempdir");
         let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
-
         let response = service
             .handle(test_request(Method::GET, "/"))
             .await
@@ -791,16 +796,15 @@ mod tests {
             203,
             serde_json::json!({
                 "file_path": "/edge.html",
-                "headers": {"x-edge": "file"}
+                "headers": {"x-edge": "file", "access-control-allow-origin": "*"}
             }),
         )
         .await;
         let temp = tempfile::tempdir().expect("tempdir");
         write_object(temp.path(), "edge.html", "<h1>Edge File</h1>", None).await;
         let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
-
         let response = service
-            .handle(test_request(Method::GET, "/"))
+            .handle(test_request_with_origin(Method::GET, "/"))
             .await
             .expect("response");
         assert_eq!(response.status, StatusCode::NON_AUTHORITATIVE_INFORMATION);
@@ -809,6 +813,7 @@ mod tests {
             bytes::Bytes::from_static(b"<h1>Edge File</h1>")
         );
         assert_header(&response, "x-edge", "file");
+        assert_header(&response, "access-control-allow-origin", "https://web.test");
     }
 
     #[tokio::test]
@@ -830,7 +835,6 @@ mod tests {
         )
         .await;
         let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
-
         let response = service
             .handle(test_request(Method::GET, "/"))
             .await
@@ -924,7 +928,6 @@ mod tests {
             body: bytes::Bytes::new(),
         }
     }
-
     fn test_request_with_origin(method: Method, path: &str) -> RenderRequest {
         let mut request = test_request(method, path);
         request
@@ -932,7 +935,6 @@ mod tests {
             .insert(header::ORIGIN, HeaderValue::from_static("https://web.test"));
         request
     }
-
     fn edge_config(extra: &str) -> EdgeConfig {
         parse_edge_config_yaml(&format!(
             r#"version: 1
@@ -946,7 +948,6 @@ missing:
         ))
         .expect("config")
     }
-
     async fn write_object(
         temp_path: &std::path::Path,
         key: &str,
@@ -961,7 +962,6 @@ missing:
         tokio::fs::write(&object_path, body)
             .await
             .expect("write object");
-
         if let Some(metadata) = metadata {
             let metadata_path = metadata_sidecar_path(&origin_dir, key).expect("metadata path");
             tokio::fs::create_dir_all(metadata_path.parent().expect("metadata parent"))
@@ -972,7 +972,6 @@ missing:
                 .expect("write metadata");
         }
     }
-
     fn test_manifest() -> crate::dto::manifest::RenderMeshManifest {
         parse_manifest_yaml(
             r#"
