@@ -1,8 +1,125 @@
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
 use crate::{dto::manifest::RenderMeshManifest, repositories::manifest::ManifestRepository};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedHost {
+    pub normalized_host: String,
+    pub matched_host: String,
+    pub origin_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostResolver {
+    exact: BTreeMap<String, String>,
+    wildcards: Vec<WildcardHost>,
+}
+
+#[derive(Clone, Debug)]
+struct WildcardHost {
+    pattern: String,
+    suffix: String,
+    origin_id: String,
+}
+
+impl HostResolver {
+    pub fn new(manifest: &RenderMeshManifest) -> Result<Self> {
+        let mut exact = BTreeMap::new();
+        let mut wildcards = Vec::new();
+
+        for (host, config) in &manifest.hosts {
+            let normalized = host.trim().to_ascii_lowercase();
+            if let Some(suffix) = normalized.strip_prefix("*.") {
+                let suffix = suffix.to_string();
+                if normalize_host(&suffix).as_deref() != Some(suffix.as_str()) {
+                    return Err(anyhow!("invalid wildcard host {host}"));
+                }
+
+                wildcards.push(WildcardHost {
+                    pattern: normalized,
+                    suffix: format!(".{suffix}"),
+                    origin_id: config.origin.clone(),
+                });
+            } else {
+                let normalized_host =
+                    normalize_host(&normalized).ok_or_else(|| anyhow!("invalid host {host}"))?;
+                exact.insert(normalized_host, config.origin.clone());
+            }
+        }
+
+        wildcards.sort_by(|left, right| right.suffix.len().cmp(&left.suffix.len()));
+
+        Ok(Self { exact, wildcards })
+    }
+
+    pub fn resolve(&self, host_header: &str) -> Option<ResolvedHost> {
+        let normalized_host = normalize_host(host_header)?;
+
+        if let Some(origin_id) = self.exact.get(&normalized_host) {
+            return Some(ResolvedHost {
+                matched_host: normalized_host.clone(),
+                normalized_host,
+                origin_id: origin_id.clone(),
+            });
+        }
+
+        for wildcard in &self.wildcards {
+            if normalized_host.ends_with(&wildcard.suffix)
+                && normalized_host.len() > wildcard.suffix.len()
+            {
+                return Some(ResolvedHost {
+                    normalized_host,
+                    matched_host: wildcard.pattern.clone(),
+                    origin_id: wildcard.origin_id.clone(),
+                });
+            }
+        }
+
+        None
+    }
+}
+
+pub fn normalize_host(host_header: &str) -> Option<String> {
+    let value = host_header.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let host = if let Some((host, port)) = value.rsplit_once(':') {
+        if port.is_empty() || !port.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        host
+    } else {
+        value
+    }
+    .trim()
+    .to_ascii_lowercase();
+
+    if is_valid_host(&host) {
+        Some(host)
+    } else {
+        None
+    }
+}
+
+fn is_valid_host(host: &str) -> bool {
+    !host.is_empty()
+        && !host.starts_with('.')
+        && !host.ends_with('.')
+        && host.split('.').all(is_valid_host_label)
+}
+
+fn is_valid_host_label(label: &str) -> bool {
+    !label.is_empty()
+        && !label.starts_with('-')
+        && !label.ends_with('-')
+        && label
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
 
 pub async fn load_manifest(
     repository: &ManifestRepository,
@@ -152,5 +269,94 @@ hosts:
         let error = validate_manifest(&manifest).expect_err("validation fails");
 
         assert!(error.to_string().contains("sync_interval_seconds"));
+    }
+
+    #[test]
+    fn exact_host_wins_over_wildcard() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  admin:
+    type: s3
+    bucket: admin
+    endpoint_env: ADMIN_ENDPOINT
+    region_env: ADMIN_REGION
+    access_key_id_env: ADMIN_KEY
+    secret_access_key_env: ADMIN_SECRET
+  web:
+    type: s3
+    bucket: web
+    endpoint_env: WEB_ENDPOINT
+    region_env: WEB_REGION
+    access_key_id_env: WEB_KEY
+    secret_access_key_env: WEB_SECRET
+hosts:
+  admin.megaloja.com.br:
+    origin: admin
+  "*.megaloja.com.br":
+    origin: web
+"#,
+        )
+        .expect("manifest parses");
+
+        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+        let resolved = resolver
+            .resolve("ADMIN.megaloja.com.br:443")
+            .expect("host resolves");
+
+        assert_eq!(resolved.origin_id, "admin");
+        assert_eq!(resolved.matched_host, "admin.megaloja.com.br");
+    }
+
+    #[test]
+    fn most_specific_wildcard_wins() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  broad:
+    type: s3
+    bucket: broad
+    endpoint_env: BROAD_ENDPOINT
+    region_env: BROAD_REGION
+    access_key_id_env: BROAD_KEY
+    secret_access_key_env: BROAD_SECRET
+  narrow:
+    type: s3
+    bucket: narrow
+    endpoint_env: NARROW_ENDPOINT
+    region_env: NARROW_REGION
+    access_key_id_env: NARROW_KEY
+    secret_access_key_env: NARROW_SECRET
+hosts:
+  "*.megaloja.com.br":
+    origin: broad
+  "*.admin.megaloja.com.br":
+    origin: narrow
+"#,
+        )
+        .expect("manifest parses");
+
+        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+        let resolved = resolver
+            .resolve("x.admin.megaloja.com.br")
+            .expect("host resolves");
+
+        assert_eq!(resolved.origin_id, "narrow");
+    }
+
+    #[test]
+    fn unknown_host_is_none() {
+        let manifest = parse_manifest_yaml(sample_manifest()).expect("manifest parses");
+        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+
+        assert!(resolver.resolve("unknown.test").is_none());
     }
 }
