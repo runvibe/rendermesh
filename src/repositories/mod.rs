@@ -1,4 +1,3 @@
-pub mod database;
 pub mod edge_http;
 pub mod local_mirror;
 pub mod manifest;

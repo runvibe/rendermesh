@@ -2514,7 +2514,7 @@ In `src/routes/mod.rs`, add:
 pub mod render;
 ```
 
-Mount the fallback after docs and MCP decisions:
+Mount the fallback after docs:
 
 ```rust
 let router = router.fallback(render::render);
@@ -2646,11 +2646,11 @@ fn spawn_background_sync(
 }
 ```
 
-Then replace the existing state construction after migrations with:
+Then build the application state with:
 
 ```rust
 let render_gateway = build_render_gateway(&config.rendermesh_manifest).await?;
-let state = AppState::new(DatabaseRepository::new(pool), render_gateway);
+let state = AppState::new(render_gateway);
 ```
 
 - [ ] **Step 6: Run integration tests and commit**

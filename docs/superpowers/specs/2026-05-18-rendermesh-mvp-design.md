@@ -629,7 +629,7 @@ After this MVP, likely next steps are:
 - Render job queue and revalidation controls.
 - Dynamic global manifest reload.
 - Push-based edge config refresh.
-- Admin API and MCP tools for inspection and invalidation.
+- Admin API tools for inspection and invalidation.
 - Per-route edge hooks.
 - After-response edge hooks.
 - Provider adapters beyond S3/R2.

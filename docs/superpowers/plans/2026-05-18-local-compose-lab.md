@@ -4,7 +4,7 @@
 
 **Goal:** Create a local RenderMesh lab that runs MinIO as an S3-compatible bucket, seeds a mini frontend app, runs a local edge API, and lets developers exercise template rendering plus static delivery.
 
-**Architecture:** Docker Compose owns local dependencies: PostgreSQL, Jaeger, MinIO, a one-shot MinIO seeder, and a tiny edge API. RenderMesh still runs from Cargo on the host and reads `examples/local/rendermesh.yaml`, which points at MinIO and the edge API. The seeded bucket contains `index.html` for Handlebars rendering, `static.html` for non-template static delivery, and `/_rendermesh/edge.yaml` for edge behavior.
+**Architecture:** Docker Compose owns local dependencies: Jaeger, MinIO, a one-shot MinIO seeder, and a tiny edge API. RenderMesh still runs from Cargo on the host and reads `examples/local/rendermesh.yaml`, which points at MinIO and the edge API. The seeded bucket contains `index.html` for Handlebars rendering, `static.html` for non-template static delivery, and `/_rendermesh/edge.yaml` for edge behavior.
 
 **Tech Stack:** Docker Compose, MinIO, Node.js edge API, existing Rust RenderMesh binary.
 
@@ -16,7 +16,7 @@
 - Modify: `docker-compose.yaml`
 
 - [x] Add `minio`, `minio-init`, and `edge-api` services.
-- [x] Keep existing Postgres and Jaeger services intact.
+- [x] Keep existing Jaeger service intact.
 - [x] Add a named `minio_data` volume.
 - [x] Validate with `docker compose config`.
 

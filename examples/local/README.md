@@ -12,7 +12,7 @@ This directory contains a complete local lab for exercising RenderMesh with:
 From the repository root:
 
 ```bash
-docker compose up -d postgres jaeger minio edge-api
+docker compose up -d jaeger minio edge-api
 docker compose run --rm minio-init
 ```
 
@@ -27,7 +27,6 @@ MinIO console:
 Run RenderMesh on the host so it can call the edge API at `127.0.0.1:4010`:
 
 ```bash
-export DATABASE_URL=postgres://postgres:postgres@localhost:5453/postgres
 export RENDERMESH_MANIFEST=./examples/local/rendermesh.yaml
 export LOCAL_APP_STORAGE_ENDPOINT=http://127.0.0.1:9000
 export LOCAL_APP_STORAGE_REGION=us-east-1

@@ -12,14 +12,12 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use rendermesh::{
-    config::{AppConfig, CorsConfig, McpConfig, DEFAULT_BODY_LIMIT_BYTES, DEFAULT_MCP_PATH},
+    config::{AppConfig, CorsConfig, DEFAULT_BODY_LIMIT_BYTES},
     libs::telemetry,
-    repositories::database::DatabaseRepository,
     routes::create_router,
     state::AppState,
 };
 use serde_json::Value;
-use sqlx::postgres::PgPoolOptions;
 use tokio::sync::OnceCell;
 use tower::ServiceExt;
 use tracing::info_span;
@@ -35,31 +33,17 @@ use rendermesh::{
 };
 
 async fn setup_router() -> Router {
-    setup_router_with_mcp(false).await
-}
-
-async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
-    let database_url = "postgres://postgres:postgres@localhost/test".to_string();
     init_telemetry().await;
-    let pool = PgPoolOptions::new()
-        .connect_lazy(&database_url)
-        .expect("lazy pool");
 
     let render_gateway = test_render_gateway(Path::new("./unused-render-mirror"));
-    let state = AppState::new(DatabaseRepository::new(pool), render_gateway);
+    let state = AppState::new(render_gateway);
     let config = AppConfig {
-        database_url,
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 0,
         cors: CorsConfig::Permissive,
         body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
         otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
-        mcp: McpConfig {
-            enabled: mcp_enabled,
-            path: DEFAULT_MCP_PATH.to_string(),
-            cors: CorsConfig::Permissive,
-        },
     };
 
     create_router(state, &config)
@@ -67,23 +51,14 @@ async fn setup_router_with_mcp(mcp_enabled: bool) -> Router {
 
 fn setup_render_router(temp_root: &Path) -> Router {
     let gateway = test_render_gateway(&temp_root.join("origins"));
-    let pool = PgPoolOptions::new()
-        .connect_lazy("postgres://postgres:postgres@localhost/test")
-        .expect("lazy pool");
-    let state = AppState::new(DatabaseRepository::new(pool), gateway);
+    let state = AppState::new(gateway);
     let config = AppConfig {
-        database_url: "postgres://postgres:postgres@localhost/test".to_string(),
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 0,
         cors: CorsConfig::Permissive,
         body_limit_bytes: 16,
         otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
-        mcp: McpConfig {
-            enabled: false,
-            path: DEFAULT_MCP_PATH.to_string(),
-            cors: CorsConfig::Permissive,
-        },
     };
 
     create_router(state, &config)
@@ -258,25 +233,6 @@ async fn render_route_applies_body_limit_to_fallback() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }
 
-fn mcp_request(method: &str, id: i64, params: Value) -> Request<Body> {
-    Request::builder()
-        .method(Method::POST)
-        .uri("/mcp")
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .header("mcp-protocol-version", "2025-06-18")
-        .body(Body::from(
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "method": method,
-                "params": params,
-            })
-            .to_string(),
-        ))
-        .expect("build mcp request")
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_returns_status() {
     let _span = info_span!("integration_test", test = "health").entered();
@@ -360,147 +316,5 @@ async fn echo_routes_reflect_request() {
         .expect("request failed");
 
     assert_eq!(head_response.status(), StatusCode::OK);
-    flush_telemetry().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_endpoint_is_absent_when_disabled() {
-    let _span = info_span!("integration_test", test = "mcp_disabled").entered();
-    let router = setup_router().await;
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/mcp")
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream")
-                .body(Body::from("{}"))
-                .expect("build request"),
-        )
-        .await
-        .expect("request failed");
-
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    flush_telemetry().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_initialize_and_tools_work_over_http() {
-    let _span = info_span!("integration_test", test = "mcp_http").entered();
-    let router = setup_router_with_mcp(true).await;
-
-    let initialize = router
-        .clone()
-        .oneshot(mcp_request(
-            "initialize",
-            1,
-            serde_json::json!({
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {
-                    "name": "integration-test",
-                    "version": "1.0"
-                }
-            }),
-        ))
-        .await
-        .expect("initialize request failed");
-
-    assert_eq!(initialize.status(), StatusCode::OK);
-    let initialize_body = response_json(initialize).await;
-    assert_eq!(initialize_body["jsonrpc"], "2.0");
-    assert_eq!(initialize_body["id"], 1);
-    assert_eq!(initialize_body["result"]["protocolVersion"], "2025-06-18");
-
-    let tools_list = router
-        .clone()
-        .oneshot(mcp_request("tools/list", 2, serde_json::json!({})))
-        .await
-        .expect("tools/list request failed");
-
-    assert_eq!(tools_list.status(), StatusCode::OK);
-    let tools_body = response_json(tools_list).await;
-    let tools = tools_body["result"]["tools"]
-        .as_array()
-        .expect("tools list must be an array");
-
-    assert!(tools.iter().any(|tool| tool["name"] == "health_check"));
-    assert!(tools.iter().any(|tool| tool["name"] == "echo_request"));
-
-    let health_call = router
-        .clone()
-        .oneshot(mcp_request(
-            "tools/call",
-            3,
-            serde_json::json!({
-                "name": "health_check",
-                "arguments": {}
-            }),
-        ))
-        .await
-        .expect("health_check request failed");
-
-    assert_eq!(health_call.status(), StatusCode::OK);
-    let health_body = response_json(health_call).await;
-    assert_eq!(
-        health_body["result"]["structuredContent"]["status"],
-        Value::String("ok".to_string())
-    );
-    assert_eq!(
-        health_body["result"]["structuredContent"]["version"],
-        Value::String(env!("CARGO_PKG_VERSION").to_string())
-    );
-
-    let echo_call = router
-        .clone()
-        .oneshot(mcp_request(
-            "tools/call",
-            4,
-            serde_json::json!({
-                "name": "echo_request",
-                "arguments": {
-                    "method": "POST",
-                    "path": "/echo",
-                    "headers": {
-                        "x-test": ["value"]
-                    },
-                    "body": "payload"
-                }
-            }),
-        ))
-        .await
-        .expect("echo_request failed");
-
-    assert_eq!(echo_call.status(), StatusCode::OK);
-    let echo_body = response_json(echo_call).await;
-    assert_eq!(echo_body["result"]["structuredContent"]["method"], "POST");
-    assert_eq!(echo_body["result"]["structuredContent"]["path"], "/echo");
-    assert_eq!(echo_body["result"]["structuredContent"]["body"], "payload");
-    assert_eq!(
-        echo_body["result"]["structuredContent"]["headers"]["x-test"][0],
-        "value"
-    );
-    flush_telemetry().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_get_is_rejected_in_stateless_mode() {
-    let _span = info_span!("integration_test", test = "mcp_get").entered();
-    let router = setup_router_with_mcp(true).await;
-    let response = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/mcp")
-                .header("accept", "text/event-stream")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("request failed");
-
-    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     flush_telemetry().await;
 }

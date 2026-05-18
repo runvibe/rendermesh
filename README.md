@@ -2,29 +2,26 @@
 
 RenderMesh is a Rust edge gateway for serving frontend applications from S3/R2-compatible buckets. It maps incoming hosts to origins, mirrors each configured bucket to local disk, derives CORS from the host map, applies per-origin edge rules, calls programmable HTTP edge hooks, and serves static assets from the local mirror.
 
-The current MVP keeps the original template health, echo, docs, PostgreSQL, OpenTelemetry, and optional MCP endpoints, then adds the RenderMesh fallback renderer for application traffic.
+The current MVP keeps health, echo, docs, and OpenTelemetry support, then adds the RenderMesh fallback renderer for application traffic.
 
 ## Getting Started
 
 ### Prerequisites
 
 - Rust stable toolchain.
-- PostgreSQL access for the template database layer.
 - S3/R2-compatible storage credentials for every configured origin.
 
 ### Run locally
 
 1. Start local infrastructure if needed:
-   - `docker compose up -d postgres jaeger`
-2. Set the database URL:
-   - `export DATABASE_URL=postgres://postgres:postgres@localhost:5453/postgres`
-3. Create a RenderMesh manifest and point the service at it:
+   - `docker compose up -d jaeger`
+2. Create a RenderMesh manifest and point the service at it:
    - `export RENDERMESH_MANIFEST=./rendermesh.yaml`
-4. Export the storage env vars referenced by the manifest.
-5. Run:
+3. Export the storage env vars referenced by the manifest.
+4. Run:
    - `cargo run`
 
-Migrations are managed by SQLx and run on startup from `migrations/`. Swagger UI remains available at `/docs`.
+Swagger UI remains available at `/docs`.
 
 ### Local bucket lab
 
@@ -126,12 +123,10 @@ CORS is derived from the manifest host map. Exact hosts allow their matching `ht
 
 Common variables:
 
-- `DATABASE_URL`
 - `RENDERMESH_MANIFEST`
 - `APP_HOST`, `APP_PORT`
 - `APP_BODY_LIMIT_BYTES`
 - `OTEL_ENABLED`
-- `MCP_ENABLED`, `MCP_PATH`, `MCP_ALLOWED_ORIGINS`
 
 Each manifest origin references storage variables such as `MY_APP_STORAGE_ENDPOINT`, `MY_APP_STORAGE_REGION`, `MY_APP_ACCESS_KEY_ID`, `MY_APP_SECRET_ACCESS_KEY`, and optionally `MY_APP_FORCE_PATH_STYLE`.
 
@@ -141,16 +136,16 @@ Each manifest origin references storage variables such as `MY_APP_STORAGE_ENDPOI
 - Integration tests: `cargo test --test integration`
 - If OpenTelemetry containers slow local runs: `OTEL_ENABLED=false cargo test`
 
-Integration tests use Docker testcontainers for PostgreSQL and, unless OTEL is disabled, Jaeger.
+Integration tests run in-process. If OpenTelemetry is enabled, Jaeger can still be used for local telemetry inspection.
 
 ## Architecture
 
 The codebase follows:
 
-- `routes/`: HTTP and MCP transport wiring
+- `routes/`: HTTP transport wiring
 - `dto/`: request/response and YAML contracts
 - `services/`: business rules and use-case orchestration
-- `repositories/`: database, local mirror, S3/R2, sync, and HTTP adapters
+- `repositories/`: local mirror, S3/R2, sync, and HTTP adapters
 
 Preferred flow:
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::repositories::database::DatabaseRepository;
 use crate::services::render_gateway::RenderGatewayService;
 
 #[derive(Clone)]
@@ -9,23 +8,15 @@ pub struct AppState {
 }
 
 struct SharedState {
-    pub database: DatabaseRepository,
     pub render_gateway: RenderGatewayService,
 }
 
 impl AppState {
-    pub fn new(database: DatabaseRepository, render_gateway: RenderGatewayService) -> Self {
-        let inner = SharedState {
-            database,
-            render_gateway,
-        };
+    pub fn new(render_gateway: RenderGatewayService) -> Self {
+        let inner = SharedState { render_gateway };
         Self {
             inner: Arc::new(inner),
         }
-    }
-
-    pub fn database(&self) -> DatabaseRepository {
-        self.inner.database.clone()
     }
 
     pub fn render_gateway(&self) -> RenderGatewayService {
@@ -37,10 +28,8 @@ impl AppState {
 mod tests {
     use std::collections::BTreeMap;
 
-    use sqlx::postgres::PgPoolOptions;
-
     use super::AppState;
-    use crate::repositories::{database::DatabaseRepository, local_mirror::LocalMirrorRepository};
+    use crate::repositories::local_mirror::LocalMirrorRepository;
     use crate::services::{
         cors::CorsPolicy,
         edge_config::default_edge_config,
@@ -49,13 +38,10 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn state_exposes_database_repository() {
-        let pool = PgPoolOptions::new().connect_lazy("postgres://postgres:postgres@localhost/test");
-        let repository = DatabaseRepository::new(pool.expect("lazy pool"));
+    async fn state_exposes_render_gateway() {
         let gateway = test_gateway();
-        let state = AppState::new(repository.clone(), gateway);
+        let state = AppState::new(gateway);
 
-        let _ = state.database();
         let _ = state.render_gateway();
     }
 

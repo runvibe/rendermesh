@@ -1,15 +1,4 @@
 services:
-  postgres:
-    image: pgvector/pgvector:pg18
-    environment:
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_USER: postgres
-      POSTGRES_DB: postgres
-    ports:
-      - 5453:5432
-    volumes:
-      - postgres_data:/var/lib/postgresql
-
   jaeger:
     image: jaegertracing/jaeger:latest
     ports:
@@ -58,7 +47,6 @@ services:
     volumes:
       - ./examples/local/edge-api:/app:ro
 volumes:
-  postgres_data:
   jaeger_data:
   minio_data:
 
