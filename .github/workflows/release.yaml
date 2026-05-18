@@ -1,4 +1,4 @@
-name: Api Release Docker Image (Artifact Build)
+name: RenderMesh Release Docker Image (Artifact Build)
 
 on:
   push:
@@ -17,6 +17,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-push:
@@ -34,7 +35,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve binary name from Cargo.toml
         id: crate
@@ -65,10 +66,10 @@ jobs:
           fi
 
       - name: Set up QEMU (for cross-compiling and image assembly)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Cache cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -86,11 +87,11 @@ jobs:
           cp target/${{ matrix.target }}/release/${{ steps.crate.outputs.bin_name }} artifacts/${{ steps.crate.outputs.bin_name }}/${{ matrix.arch }}/${{ steps.crate.outputs.bin_name }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ steps.crate.outputs.bin_name }}
@@ -99,14 +100,14 @@ jobs:
             type=raw,value=${{ github.sha }}-${{ matrix.arch }}
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push image for ${{ matrix.platform }}
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile.artifact
@@ -127,7 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Resolve binary name from Cargo.toml
         id: crate
@@ -141,7 +142,7 @@ jobs:
 
       - name: Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ghcr.io/${{ github.repository_owner }}/${{ steps.crate.outputs.bin_name }}
@@ -150,7 +151,7 @@ jobs:
             type=raw,value=${{ github.sha }}
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
