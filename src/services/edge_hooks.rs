@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 
 use anyhow::{anyhow, Result};
 use axum::http::StatusCode;
+use handlebars::Handlebars;
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::dto::edge::EdgeHookPayload;
 
@@ -27,6 +29,28 @@ pub enum EdgePayloadOutcome {
         status: StatusCode,
         params: Value,
     },
+}
+
+#[derive(Debug, Error)]
+pub enum RenderTemplateError {
+    #[error("unsupported media type")]
+    UnsupportedMediaType,
+    #[error(transparent)]
+    Render(#[from] handlebars::RenderError),
+    #[error(transparent)]
+    Template(#[from] handlebars::TemplateError),
+}
+
+impl PartialEq for RenderTemplateError {
+    fn eq(&self, other: &Self) -> bool {
+        matches!(
+            (self, other),
+            (
+                RenderTemplateError::UnsupportedMediaType,
+                RenderTemplateError::UnsupportedMediaType
+            )
+        )
+    }
 }
 
 pub fn apply_edge_payload(
@@ -61,11 +85,36 @@ pub fn validate_edge_file_path(path: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn render_html_template(
+    path: &str,
+    content_type: Option<&str>,
+    body: &str,
+    params: &Value,
+) -> std::result::Result<String, RenderTemplateError> {
+    if !is_html(path, content_type) {
+        return Err(RenderTemplateError::UnsupportedMediaType);
+    }
+
+    let handlebars = Handlebars::new();
+    handlebars.render_template(body, params).map_err(Into::into)
+}
+
+pub fn is_html(path: &str, content_type: Option<&str>) -> bool {
+    if let Some(content_type) = content_type {
+        let media_type = content_type.split(';').next().unwrap_or_default().trim();
+        return media_type.eq_ignore_ascii_case("text/html");
+    }
+
+    let path = path.to_ascii_lowercase();
+    path.ends_with(".html") || path.ends_with(".htm")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::dto::edge::EdgeHookPayload;
     use axum::http::StatusCode;
+    use serde_json::json;
 
     #[test]
     fn headers_only_payload_continues_and_accumulates() {
@@ -158,5 +207,31 @@ mod tests {
     #[test]
     fn validate_edge_file_path_accepts_valid_path_without_dotdot() {
         validate_edge_file_path("/safe/v1-2/index.html").expect("path is valid");
+    }
+
+    #[test]
+    fn renders_html_with_params() {
+        let rendered = render_html_template(
+            "/index.html",
+            Some("text/html"),
+            "<h1>{{title}}</h1>",
+            &json!({ "title": "Hello" }),
+        )
+        .expect("html template renders");
+
+        assert_eq!(rendered, "<h1>Hello</h1>");
+    }
+
+    #[test]
+    fn rejects_params_for_non_html() {
+        let error = render_html_template(
+            "/data.json",
+            Some("application/json"),
+            "{\"title\":\"{{title}}\"}",
+            &json!({ "title": "Hello" }),
+        )
+        .expect_err("non-html templates are rejected");
+
+        assert_eq!(error, RenderTemplateError::UnsupportedMediaType);
     }
 }
