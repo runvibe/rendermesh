@@ -60,7 +60,7 @@ pub fn validate_edge_config(config: &EdgeConfig) -> Result<()> {
                 edge.name
             ));
         }
-        url::Url::parse(&edge.url)?;
+        validate_edge_hook_url(&edge.url)?;
     }
 
     Ok(())
@@ -118,8 +118,11 @@ fn validate_optional_path(field: &str, value: Option<&str>) -> Result<()> {
 
 fn validate_absolute_path(field: &str, path: &str) -> Result<()> {
     let has_control_char = path.chars().any(char::is_control);
-    if path.is_empty() || !path.starts_with('/') || path.contains("..") || has_control_char {
-        return Err(anyhow!("{field} must be an absolute path without .."));
+    if path.is_empty() || !path.starts_with('/') || has_control_char {
+        return Err(anyhow!("{field} must be a non-empty absolute path"));
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(anyhow!("{field} cannot contain parent directory segments"));
     }
     Ok(())
 }
@@ -127,6 +130,14 @@ fn validate_absolute_path(field: &str, path: &str) -> Result<()> {
 fn validate_redirect_status(status: u16) -> Result<()> {
     if !matches!(status, 301 | 302 | 307 | 308) {
         return Err(anyhow!("invalid redirect status {status}"));
+    }
+    Ok(())
+}
+
+fn validate_edge_hook_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(anyhow!("edge hook url must use http or https"));
     }
     Ok(())
 }
@@ -174,5 +185,60 @@ edges:
         assert_eq!(config.redirects[0].from, "/old/*");
         assert_eq!(config.rewrites[0].to, "/docs/index.html");
         assert_eq!(config.edges[0].timeout_ms, 800);
+    }
+
+    #[test]
+    fn rejects_non_http_edge_hook_urls() {
+        for url in ["file:///tmp/edge", "ftp://example.com/edge"] {
+            let yaml = format!(
+                r#"
+version: 1
+edge:
+  root_object: /index.html
+missing:
+  action: not_found
+edges:
+  - name: auth
+    url: {url}
+    timeout_ms: 800
+"#
+            );
+
+            let error = parse_edge_config_yaml(&yaml).expect_err("edge config validation fails");
+
+            assert!(error.to_string().contains("http or https"));
+        }
+    }
+
+    #[test]
+    fn allows_paths_with_dot_sequences_inside_segment_names() {
+        let yaml = r#"
+version: 1
+edge:
+  root_object: /docs/v1..2/index.html
+missing:
+  action: not_found
+  page: /index.html
+"#;
+
+        let config = parse_edge_config_yaml(yaml).expect("edge config parses");
+
+        assert_eq!(config.edge.root_object, "/docs/v1..2/index.html");
+    }
+
+    #[test]
+    fn rejects_parent_directory_path_segments() {
+        let yaml = r#"
+version: 1
+edge:
+  root_object: /docs/../secret.html
+missing:
+  action: not_found
+  page: /index.html
+"#;
+
+        let error = parse_edge_config_yaml(yaml).expect_err("edge config validation fails");
+
+        assert!(error.to_string().contains("parent directory"));
     }
 }
