@@ -271,6 +271,51 @@ missing:
     }
 
     #[tokio::test]
+    async fn sync_origin_refreshes_edge_config_store_from_json_object() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let mirror = LocalMirrorRepository::new(&root);
+        let syncer = MirrorSyncService::new(&root);
+        let store = EdgeConfigStore::from_configs(BTreeMap::new());
+        store.set_invalid("web", "old error");
+        let storage = StaticStorage::new(BTreeMap::from([(
+            "_rendermesh/edge.json".to_string(),
+            json_edge_object(
+                "_rendermesh/edge.json",
+                r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/json-sync.html",
+    "auto_rewrite_index": false
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/json-sync.html"
+  }
+}
+"#,
+            ),
+        )]));
+
+        let template_store = TemplateStore::default();
+        sync_origin_and_refresh_edge_config(
+            "web",
+            &syncer,
+            &storage,
+            &mirror,
+            &store,
+            &template_store,
+        )
+        .await
+        .expect("sync succeeds");
+
+        let config = store.get("web").expect("json config refreshed");
+        assert_eq!(config.edge.root_object, "/json-sync.html");
+        assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
     async fn load_edge_configs_reads_json_when_yaml_is_missing() {
         let temp = tempfile::tempdir().expect("tempdir");
         let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
@@ -297,6 +342,76 @@ missing:
 
         let config = store.get("web").expect("json config loaded");
         assert_eq!(config.edge.root_object, "/json.html");
+        assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_reads_yml_when_yaml_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.yml",
+            r#"
+version: 1
+edge:
+  root_object: /yml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /yml.html
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("yml config loaded");
+        assert_eq!(config.edge.root_object, "/yml.html");
+        assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_prefers_yaml_over_json() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.yaml",
+            r#"
+version: 1
+edge:
+  root_object: /yaml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /yaml.html
+"#,
+        )
+        .await;
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.json",
+            r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/json.html",
+    "auto_rewrite_index": true
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/json.html"
+  }
+}
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("config loaded");
+        assert_eq!(config.edge.root_object, "/yaml.html");
         assert!(!config.edge.auto_rewrite_index);
     }
 
@@ -354,6 +469,17 @@ missing:
             etag: Some("edge".to_string()),
             last_modified: None,
             content_type: Some("application/yaml".to_string()),
+            cache_control: None,
+        }
+    }
+
+    fn json_edge_object(key: &str, body: &str) -> RemoteObject {
+        RemoteObject {
+            key: key.to_string(),
+            body: Bytes::from(body.to_string()),
+            etag: Some("edge-json".to_string()),
+            last_modified: None,
+            content_type: Some("application/json".to_string()),
             cache_control: None,
         }
     }
