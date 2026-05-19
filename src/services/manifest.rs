@@ -327,7 +327,7 @@ hosts:
     origin: missing
 "#;
 
-        let manifest = serde_yaml::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
+        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
             .expect("yaml parses");
         let error = validate_manifest(&manifest).expect_err("validation fails");
 
@@ -354,7 +354,7 @@ hosts:
     origin: web
 "#;
 
-        let manifest = serde_yaml::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
+        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
             .expect("yaml parses");
         let error = validate_manifest(&manifest).expect_err("validation fails");
 
