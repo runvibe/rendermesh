@@ -1,6 +1,9 @@
 use anyhow::{anyhow, Result};
 
-use crate::dto::edge::{EdgeConfig, EdgeDefaults, MissingAction, MissingConfig};
+use crate::{
+    dto::edge::{EdgeConfig, EdgeDefaults, MissingAction, MissingConfig},
+    services::config_format::parse_config,
+};
 
 pub fn default_edge_config() -> EdgeConfig {
     EdgeConfig {
@@ -23,7 +26,11 @@ pub fn default_edge_config() -> EdgeConfig {
 }
 
 pub fn parse_edge_config_yaml(input: &str) -> Result<EdgeConfig> {
-    let config = serde_yaml::from_str::<EdgeConfig>(input)?;
+    parse_edge_config(input)
+}
+
+pub fn parse_edge_config(input: &str) -> Result<EdgeConfig> {
+    let config = parse_config::<EdgeConfig>("edge config", input)?;
     validate_edge_config(&config)?;
     Ok(config)
 }
@@ -181,6 +188,50 @@ edges:
 "#;
 
         let config = parse_edge_config_yaml(yaml).expect("edge config parses");
+
+        assert_eq!(config.redirects[0].from, "/old/*");
+        assert_eq!(config.rewrites[0].to, "/docs/index.html");
+        assert_eq!(config.edges[0].timeout_ms, 800);
+    }
+
+    #[test]
+    fn parses_edge_config_json() {
+        let config = parse_edge_config(
+            r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/index.html",
+    "auto_rewrite_index": true
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/index.html"
+  },
+  "redirects": [
+    {
+      "from": "/old/*",
+      "to": "/new/:splat",
+      "status": 301
+    }
+  ],
+  "rewrites": [
+    {
+      "from": "/docs",
+      "to": "/docs/index.html"
+    }
+  ],
+  "edges": [
+    {
+      "name": "auth",
+      "url": "https://api.example.com/edge",
+      "timeout_ms": 800
+    }
+  ]
+}
+"#,
+        )
+        .expect("json edge config parses");
 
         assert_eq!(config.redirects[0].from, "/old/*");
         assert_eq!(config.rewrites[0].to, "/docs/index.html");

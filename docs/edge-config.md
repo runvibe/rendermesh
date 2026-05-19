@@ -1,6 +1,12 @@
 # Origin Edge Config
 
-Each origin can include `/_rendermesh/edge.yaml` inside its bucket. This file controls request behavior for that origin.
+Each origin can include an edge config inside its bucket. RenderMesh checks these paths in order:
+
+1. `/_rendermesh/edge.yaml`
+2. `/_rendermesh/edge.yml`
+3. `/_rendermesh/edge.json`
+
+The file controls request behavior for that origin. YAML and JSON use the same schema.
 
 If the file is missing, RenderMesh uses safe defaults. If the file exists but is invalid, only that origin becomes unavailable and requests for it return `500` until a valid config is synced.
 
@@ -16,6 +22,22 @@ edge:
 missing:
   action: not_found
   page: /index.html
+```
+
+The same config in JSON:
+
+```json
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/index.html",
+    "auto_rewrite_index": true
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/index.html"
+  }
+}
 ```
 
 ## `edge`

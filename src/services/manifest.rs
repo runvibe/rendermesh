@@ -2,7 +2,10 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
-use crate::{dto::manifest::RenderMeshManifest, repositories::manifest::ManifestRepository};
+use crate::{
+    dto::manifest::RenderMeshManifest, repositories::manifest::ManifestRepository,
+    services::config_format::parse_config,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedHost {
@@ -126,11 +129,15 @@ pub async fn load_manifest(
     path: impl AsRef<Path>,
 ) -> Result<Arc<RenderMeshManifest>> {
     let content = repository.load_content(path).await?;
-    Ok(Arc::new(parse_manifest_yaml(&content)?))
+    Ok(Arc::new(parse_manifest_config(&content)?))
 }
 
 pub fn parse_manifest_yaml(input: &str) -> Result<RenderMeshManifest> {
-    let manifest = serde_yaml::from_str::<RenderMeshManifest>(input)?;
+    parse_manifest_config(input)
+}
+
+pub fn parse_manifest_config(input: &str) -> Result<RenderMeshManifest> {
+    let manifest = parse_config::<RenderMeshManifest>("manifest", input)?;
     validate_manifest(&manifest)?;
     Ok(manifest)
 }
@@ -225,6 +232,89 @@ hosts:
     }
 
     #[test]
+    fn parses_manifest_json() {
+        let manifest = parse_manifest_config(
+            r#"
+{
+  "version": 1,
+  "runtime": {
+    "local_store_dir": "./var/rendermesh/origins",
+    "sync_interval_seconds": 60
+  },
+  "origins": {
+    "my_app": {
+      "type": "s3",
+      "bucket": "bucket_my_app_123",
+      "endpoint_env": "MY_APP_STORAGE_ENDPOINT",
+      "region_env": "MY_APP_STORAGE_REGION",
+      "access_key_id_env": "MY_APP_ACCESS_KEY_ID",
+      "secret_access_key_env": "MY_APP_SECRET_ACCESS_KEY",
+      "force_path_style_env": "MY_APP_FORCE_PATH_STYLE",
+      "sync_interval_seconds": 30
+    }
+  },
+  "hosts": {
+    "myapp.com": {
+      "origin": "my_app"
+    },
+    "*.myapp.com": {
+      "origin": "my_app"
+    }
+  }
+}
+"#,
+        )
+        .expect("json manifest parses");
+
+        assert_eq!(manifest.version, 1);
+        assert_eq!(manifest.origins["my_app"].bucket, "bucket_my_app_123");
+        assert_eq!(manifest.hosts["*.myapp.com"].origin, "my_app");
+    }
+
+    #[tokio::test]
+    async fn load_manifest_reads_json_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("rendermesh.json");
+        tokio::fs::write(
+            &path,
+            r#"
+{
+  "version": 1,
+  "runtime": {
+    "local_store_dir": "./var/rendermesh/origins",
+    "sync_interval_seconds": 45
+  },
+  "origins": {
+    "web": {
+      "type": "s3",
+      "bucket": "web-bucket",
+      "endpoint_env": "WEB_ENDPOINT",
+      "region_env": "WEB_REGION",
+      "access_key_id_env": "WEB_ACCESS_KEY_ID",
+      "secret_access_key_env": "WEB_SECRET_ACCESS_KEY"
+    }
+  },
+  "hosts": {
+    "app.test": {
+      "origin": "web"
+    }
+  }
+}
+"#,
+        )
+        .await
+        .expect("write manifest");
+
+        let manifest = load_manifest(&ManifestRepository::new(), &path)
+            .await
+            .expect("json manifest loads");
+
+        assert_eq!(manifest.runtime.sync_interval_seconds, 45);
+        assert_eq!(manifest.origins["web"].bucket, "web-bucket");
+        assert_eq!(manifest.hosts["app.test"].origin, "web");
+    }
+
+    #[test]
     fn rejects_host_that_references_missing_origin() {
         let yaml = r#"
 version: 1
@@ -237,7 +327,7 @@ hosts:
     origin: missing
 "#;
 
-        let manifest = serde_yaml::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
+        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
             .expect("yaml parses");
         let error = validate_manifest(&manifest).expect_err("validation fails");
 
@@ -264,7 +354,7 @@ hosts:
     origin: web
 "#;
 
-        let manifest = serde_yaml::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
+        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
             .expect("yaml parses");
         let error = validate_manifest(&manifest).expect_err("validation fails");
 
