@@ -23,8 +23,8 @@ pub struct OriginConfig {
     pub bucket: String,
     pub endpoint_env: String,
     pub region_env: String,
-    pub access_key_id_env: String,
-    pub secret_access_key_env: String,
+    pub access_key_id_env: Option<String>,
+    pub secret_access_key_env: Option<String>,
     pub force_path_style_env: Option<String>,
     pub sync_interval_seconds: Option<u64>,
 }

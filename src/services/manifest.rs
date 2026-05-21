@@ -271,6 +271,33 @@ hosts:
         assert_eq!(manifest.hosts["*.myapp.com"].origin, "my_app");
     }
 
+    #[test]
+    fn parses_s3_origin_without_static_credential_envs() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: s3
+    bucket: web-bucket
+    endpoint_env: WEB_ENDPOINT
+    region_env: WEB_REGION
+hosts:
+  app.test:
+    origin: web
+"#,
+        )
+        .expect("manifest parses without static credential envs");
+
+        let origin = &manifest.origins["web"];
+        assert_eq!(origin.bucket, "web-bucket");
+        assert_eq!(origin.access_key_id_env, None);
+        assert_eq!(origin.secret_access_key_env, None);
+    }
+
     #[tokio::test]
     async fn load_manifest_reads_json_file() {
         let temp = tempfile::tempdir().expect("tempdir");
