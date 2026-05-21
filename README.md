@@ -97,8 +97,6 @@ origins:
     bucket: bucket_my_app_123
     endpoint_env: MY_APP_STORAGE_ENDPOINT
     region_env: MY_APP_STORAGE_REGION
-    access_key_id_env: MY_APP_ACCESS_KEY_ID
-    secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
 
@@ -110,6 +108,8 @@ hosts:
 ```
 
 Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
+
+For AWS environments, omit `access_key_id_env` and `secret_access_key_env` to use the AWS SDK default credential chain, including EKS IRSA. For S3-compatible local labs or providers that require static credentials, configure both fields.
 
 ## Minimal Origin Edge Config
 

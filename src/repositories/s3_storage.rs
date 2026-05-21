@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::{config::Region, Client};
 use bytes::Bytes;
@@ -21,15 +22,6 @@ impl S3StorageRepository {
             .with_context(|| format!("read S3 endpoint env {}", origin.endpoint_env))?;
         let region = std::env::var(&origin.region_env)
             .with_context(|| format!("read S3 region env {}", origin.region_env))?;
-        let access_key_id = std::env::var(&origin.access_key_id_env)
-            .with_context(|| format!("read S3 access key id env {}", origin.access_key_id_env))?;
-        let secret_access_key =
-            std::env::var(&origin.secret_access_key_env).with_context(|| {
-                format!(
-                    "read S3 secret access key env {}",
-                    origin.secret_access_key_env
-                )
-            })?;
         let force_path_style = origin
             .force_path_style_env
             .as_ref()
@@ -43,15 +35,40 @@ impl S3StorageRepository {
             .flatten()
             .unwrap_or(false);
 
-        let credentials =
-            Credentials::new(access_key_id, secret_access_key, None, None, "rendermesh");
-        let config = aws_sdk_s3::config::Builder::new()
-            .behavior_version_latest()
-            .endpoint_url(endpoint)
-            .region(Region::new(region))
-            .credentials_provider(credentials)
-            .force_path_style(force_path_style)
-            .build();
+        let config = match (&origin.access_key_id_env, &origin.secret_access_key_env) {
+            (Some(access_key_id_env), Some(secret_access_key_env)) => {
+                let access_key_id = std::env::var(access_key_id_env)
+                    .with_context(|| format!("read S3 access key id env {access_key_id_env}"))?;
+                let secret_access_key =
+                    std::env::var(secret_access_key_env).with_context(|| {
+                        format!("read S3 secret access key env {secret_access_key_env}")
+                    })?;
+
+                let credentials =
+                    Credentials::new(access_key_id, secret_access_key, None, None, "rendermesh");
+                aws_sdk_s3::config::Builder::new()
+                    .behavior_version_latest()
+                    .endpoint_url(endpoint)
+                    .region(Region::new(region))
+                    .credentials_provider(credentials)
+                    .force_path_style(force_path_style)
+                    .build()
+            }
+            (None, None) => {
+                let shared_config = aws_config::defaults(BehaviorVersion::latest())
+                    .endpoint_url(endpoint)
+                    .region(Region::new(region))
+                    .load()
+                    .await;
+
+                aws_sdk_s3::config::Builder::from(&shared_config)
+                    .force_path_style(force_path_style)
+                    .build()
+            }
+            _ => anyhow::bail!(
+                "access_key_id_env and secret_access_key_env must be configured together"
+            ),
+        };
 
         Ok(Self {
             client: Client::from_conf(config),
@@ -100,8 +117,8 @@ mod tests {
             bucket: "rendermesh-local".to_string(),
             endpoint_env: "TEST_S3_ENDPOINT".to_string(),
             region_env: "TEST_S3_REGION".to_string(),
-            access_key_id_env: "TEST_S3_ACCESS_KEY_ID".to_string(),
-            secret_access_key_env: "TEST_S3_SECRET_ACCESS_KEY".to_string(),
+            access_key_id_env: Some("TEST_S3_ACCESS_KEY_ID".to_string()),
+            secret_access_key_env: Some("TEST_S3_SECRET_ACCESS_KEY".to_string()),
             force_path_style_env: Some("TEST_S3_FORCE_PATH_STYLE".to_string()),
             sync_interval_seconds: None,
         };
@@ -109,6 +126,27 @@ mod tests {
         let _repository = S3StorageRepository::from_origin_config(&origin)
             .await
             .expect("repository builds");
+    }
+
+    #[tokio::test]
+    async fn builds_s3_client_from_default_credential_chain_when_static_envs_are_absent() {
+        let _endpoint = EnvVarGuard::set("TEST_S3_ENDPOINT", "https://s3.us-east-1.amazonaws.com");
+        let _region = EnvVarGuard::set("TEST_S3_REGION", "us-east-1");
+
+        let origin = OriginConfig {
+            origin_type: crate::dto::manifest::OriginType::S3,
+            bucket: "rendermesh-prod".to_string(),
+            endpoint_env: "TEST_S3_ENDPOINT".to_string(),
+            region_env: "TEST_S3_REGION".to_string(),
+            access_key_id_env: None,
+            secret_access_key_env: None,
+            force_path_style_env: None,
+            sync_interval_seconds: None,
+        };
+
+        let _repository = S3StorageRepository::from_origin_config(&origin)
+            .await
+            .expect("repository builds from default credential chain");
     }
 
     struct EnvVarGuard {

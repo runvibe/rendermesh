@@ -17,15 +17,17 @@ Common runtime variables:
 - `APP_BODY_LIMIT_BYTES`: Request body read limit for fallback rendering. Defaults to `1048576`.
 - `OTEL_ENABLED`: Enables OpenTelemetry export when truthy. Defaults to enabled.
 
-Each origin references storage credentials by environment variable name:
+Each origin references storage connection settings by environment variable name:
 
 - Endpoint: for example `MY_APP_STORAGE_ENDPOINT`.
 - Region: for example `MY_APP_STORAGE_REGION`.
-- Access key id: for example `MY_APP_ACCESS_KEY_ID`.
-- Secret access key: for example `MY_APP_SECRET_ACCESS_KEY`.
+- Optional access key id: for example `MY_APP_ACCESS_KEY_ID`.
+- Optional secret access key: for example `MY_APP_SECRET_ACCESS_KEY`.
 - Optional force path style flag: for example `MY_APP_FORCE_PATH_STYLE`.
 
 Truth values for `force_path_style` are `1`, `true`, `yes`, and `on`. False values are `0`, `false`, `no`, and `off`.
+
+When `access_key_id_env` and `secret_access_key_env` are omitted, RenderMesh uses the AWS SDK default credential chain. This supports IAM roles for service accounts (IRSA) on EKS, EC2 instance roles, and the usual local AWS credential sources. If one static credential field is configured, both must be configured.
 
 ## Global Manifest Example
 
@@ -44,8 +46,6 @@ origins:
     bucket: bucket_my_app_123
     endpoint_env: MY_APP_STORAGE_ENDPOINT
     region_env: MY_APP_STORAGE_REGION
-    access_key_id_env: MY_APP_ACCESS_KEY_ID
-    secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
 
@@ -71,10 +71,34 @@ Fields:
 - `bucket`: Bucket name used by the storage provider.
 - `endpoint_env`: Environment variable containing the S3/R2 endpoint.
 - `region_env`: Environment variable containing the region.
-- `access_key_id_env`: Environment variable containing the access key id.
-- `secret_access_key_env`: Environment variable containing the secret access key.
+- `access_key_id_env`: Optional environment variable containing the access key id for static credentials.
+- `secret_access_key_env`: Optional environment variable containing the secret access key for static credentials.
 - `force_path_style_env`: Optional environment variable controlling path-style S3 access.
 - `sync_interval_seconds`: Optional origin-specific sync interval.
+
+For EKS with IRSA or other AWS managed identities, omit `access_key_id_env` and `secret_access_key_env`:
+
+```yaml
+origins:
+  my_app:
+    type: s3
+    bucket: bucket_my_app_123
+    endpoint_env: MY_APP_STORAGE_ENDPOINT
+    region_env: MY_APP_STORAGE_REGION
+```
+
+For S3-compatible providers that require static credentials, configure both fields:
+
+```yaml
+origins:
+  my_app:
+    type: s3
+    bucket: bucket_my_app_123
+    endpoint_env: MY_APP_STORAGE_ENDPOINT
+    region_env: MY_APP_STORAGE_REGION
+    access_key_id_env: MY_APP_ACCESS_KEY_ID
+    secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
+```
 
 ## `hosts`
 
