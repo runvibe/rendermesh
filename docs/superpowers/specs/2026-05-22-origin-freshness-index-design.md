@@ -41,6 +41,27 @@ source data provider during normal request handling.
 - No filesystem watcher in the local provider MVP.
 - No global cache semantics beyond the origin mirror and template registry.
 
+## Required Capabilities
+
+The first implementation should include these capabilities before the feature is
+considered complete:
+
+- Atomic snapshots per origin.
+- An in-memory freshness index per origin.
+- An explicit diff model for `added`, `modified`, `removed`, and `unchanged`
+  files.
+- Incremental Handlebars AST updates.
+- Previous-generation fallback for any refresh failure.
+- OpenTelemetry traces and metrics for each refresh stage.
+- A documented error policy for listing, fetching, parsing, compiling, and
+  activation failures.
+
+Optional follow-up capabilities:
+
+- Hash-based verification when provider metadata is weak or absent.
+- Debug/admin endpoints for inspecting origin snapshots.
+- Local filesystem watchers for development-oriented local origins.
+
 ## Core Model
 
 Each origin should have an in-memory `OriginFreshnessIndex`.
@@ -193,6 +214,56 @@ another generation.
 This is the key improvement over the current behavior, where the mirror is
 activated first and templates are refreshed afterward.
 
+## Runtime Data Tree
+
+The runtime state should be structured around active per-origin snapshots:
+
+```text
+RenderMeshRuntime
+└── origins
+    ├── my_app
+    │   ├── active_snapshot
+    │   │   ├── generation
+    │   │   ├── activated_at
+    │   │   ├── mirror_root
+    │   │   ├── freshness_index
+    │   │   │   ├── captured_at
+    │   │   │   └── files
+    │   │   │       ├── index.html
+    │   │   │       │   ├── size
+    │   │   │       │   ├── created_at
+    │   │   │       │   ├── last_modified
+    │   │   │       │   ├── captured_at
+    │   │   │       │   ├── etag
+    │   │   │       │   └── content_type
+    │   │   │       └── assets/app.js
+    │   │   ├── edge_config
+    │   │   └── templates
+    │   │       └── Handlebars AST registry
+    │   └── refresh_state
+    │       ├── next_generation
+    │       ├── next_freshness_index
+    │       ├── diff
+    │       ├── staging_mirror_root
+    │       └── compiled_template_changes
+    └── other_app
+        └── active_snapshot
+```
+
+The corresponding filesystem layout should remain simple:
+
+```text
+var/rendermesh/
+├── origins/
+│   ├── my_app/
+│   │   ├── index.html
+│   │   ├── _rendermesh/edge.yaml
+│   │   └── .rendermesh-meta/
+│   └── other_app/
+└── .rendermesh-sync/
+    └── my_app-43-<timestamp>/
+```
+
 ## Memory Ownership
 
 All per-origin runtime state should be owned by a main runtime state object and
@@ -220,6 +291,124 @@ The provider only changes how listing metadata and file bodies are retrieved.
 The diff, mirror update, template update, and snapshot activation logic should be
 provider-independent.
 
+## Error Policy
+
+Refresh failures should be isolated to the affected origin and should keep the
+previous generation active.
+
+Policy by failure type:
+
+- Source listing failure: keep previous snapshot and previous freshness index.
+- Source fetch/copy failure: keep previous snapshot and discard staging work.
+- Invalid source key: fail the refresh for that origin and keep previous
+  snapshot.
+- Edge config parse failure: keep previous snapshot, record the error, and do
+  not activate the new mirror.
+- Template compilation failure: keep previous snapshot, record the error, and do
+  not activate the new mirror.
+- Snapshot activation failure: keep or restore previous snapshot.
+- Metadata sidecar write failure: fail the refresh and keep previous snapshot.
+- Background refresh failure: log and trace the error, then retry on the next
+  interval.
+
+Startup remains stricter:
+
+- If the first refresh for any configured origin fails, startup fails.
+- This prevents RenderMesh from serving an origin with no known good snapshot.
+
+## Observability
+
+Every refresh should emit traces and metrics with origin and generation fields.
+
+Recommended spans:
+
+- `rendermesh.origin_refresh`
+- `rendermesh.origin_list`
+- `rendermesh.origin_diff`
+- `rendermesh.origin_fetch_changed`
+- `rendermesh.origin_stage_mirror`
+- `rendermesh.origin_parse_edge_config`
+- `rendermesh.origin_compile_templates`
+- `rendermesh.origin_activate_snapshot`
+
+Recommended span fields:
+
+- `origin`
+- `origin_type`
+- `generation`
+- `previous_generation`
+- `listed_files`
+- `added_files`
+- `modified_files`
+- `removed_files`
+- `unchanged_files`
+- `template_candidates`
+- `compiled_templates`
+- `removed_templates`
+- `duration_ms`
+- `error`
+
+Recommended metrics:
+
+- refresh duration by origin
+- listed file count
+- added/modified/removed/unchanged file counts
+- downloaded/copied byte count
+- template compile count
+- template compile failure count
+- edge config parse failure count
+- active generation by origin
+- last successful refresh timestamp by origin
+
+## Refresh Configuration
+
+The existing interval fields remain valid:
+
+```yaml
+runtime:
+  sync_interval_seconds: 60
+
+origins:
+  my_app:
+    sync_interval_seconds: 30
+```
+
+A later manifest version may add an explicit refresh policy:
+
+```yaml
+runtime:
+  refresh:
+    interval_seconds: 60
+    hash_when_metadata_missing: true
+    fail_on_template_error: true
+    fail_on_edge_config_error: true
+```
+
+For this version, the default policy should be conservative:
+
+- Keep old generation on template errors.
+- Keep old generation on edge config errors.
+- Use provider metadata for change detection when available.
+- Allow hash-based fallback as an implementation option, not a required config
+  field.
+
+## Debug And Admin Visibility
+
+Debug visibility is desirable because freshness bugs are otherwise hard to
+reason about.
+
+Potential read-only endpoints:
+
+```text
+GET /_rendermesh/origins
+GET /_rendermesh/origins/{origin_id}/snapshot
+GET /_rendermesh/origins/{origin_id}/freshness
+```
+
+The MVP can defer these endpoints, but the internal state should be shaped so
+they are easy to add. Any debug endpoint must avoid leaking secrets or full
+source credentials.
+
 ## Current Gap
 
 The current implementation already does parts of this:
@@ -239,6 +428,8 @@ The missing pieces are:
 - No incremental template AST update.
 - No atomic origin snapshot that ties mirror, edge config, freshness index, and
   templates to the same generation.
+- Limited observability for freshness decisions and generation activation.
+- No debug surface for inspecting active generation or known file state.
 
 ## Testing Plan
 
@@ -257,6 +448,8 @@ Unit tests:
 - Removes AST when an HTML file is removed.
 - Removes AST when an HTML file becomes non-HTML.
 - Recompiles AST when an HTML file changes.
+- Keeps unchanged files unchanged when only `captured_at` differs.
+- Records refresh error state without replacing the active snapshot.
 
 Service tests:
 
@@ -266,6 +459,9 @@ Service tests:
 - Refresh keeps previous snapshot if edge config parsing fails.
 - Refresh swaps snapshot after mirror, edge config, and templates all succeed.
 - In-flight snapshot access remains valid after a newer snapshot activates.
+- Refresh emits span fields and metrics for diff counts.
+- Hash fallback detects content change when provider metadata is insufficient,
+  if hash fallback is implemented.
 
 Integration tests:
 
@@ -282,6 +478,8 @@ Integration tests:
 - Template AST updates happen only for changed template candidates.
 - Deleted templates are removed from the active template registry after a
   successful refresh.
+- Refresh failures never expose a partially updated origin.
 - Mirror files, edge config, freshness index, and templates activate as one
   generation.
 - Failed refreshes keep the previous generation active.
+- Refresh traces include origin, generation, and diff counts.
