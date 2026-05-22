@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rendermesh::{
     config::AppConfig, libs::telemetry, routes::create_router,
-    services::startup::build_render_gateway, state::AppState,
+    services::startup::build_render_runtime, state::AppState,
 };
 use tokio::net::TcpListener;
 
@@ -11,8 +11,8 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     let _telemetry = telemetry::init_tracing(config.otel_enabled)?;
 
-    let render_gateway = build_render_gateway(&config.rendermesh_manifest).await?;
-    let state = AppState::new(render_gateway);
+    let runtime = build_render_runtime(&config.rendermesh_manifest).await?;
+    let state = AppState::new_with_runtime(runtime.render_gateway, runtime.origin_runtime);
 
     let router = create_router(state, &config);
 

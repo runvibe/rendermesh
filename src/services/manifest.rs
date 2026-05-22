@@ -3,7 +3,8 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use anyhow::{anyhow, Result};
 
 use crate::{
-    dto::manifest::RenderMeshManifest, repositories::manifest::ManifestRepository,
+    dto::manifest::{OriginConfig, RenderMeshManifest},
+    repositories::manifest::ManifestRepository,
     services::config_format::parse_config,
 };
 
@@ -155,10 +156,19 @@ pub fn validate_manifest(manifest: &RenderMeshManifest) -> Result<()> {
 
     for (origin_id, origin) in &manifest.origins {
         validate_origin_id(origin_id)?;
-        if origin.bucket.trim().is_empty() {
-            return Err(anyhow!("origin {origin_id} bucket is required"));
+        match origin {
+            OriginConfig::S3(origin) => {
+                if origin.bucket.trim().is_empty() {
+                    return Err(anyhow!("origin {origin_id} bucket is required"));
+                }
+            }
+            OriginConfig::Local(origin) => {
+                if origin.path.trim().is_empty() {
+                    return Err(anyhow!("origin {origin_id} path is required"));
+                }
+            }
         }
-        if origin.sync_interval_seconds == Some(0) {
+        if origin.sync_interval_seconds() == Some(0) {
             return Err(anyhow!(
                 "origin {origin_id} sync_interval_seconds must be positive"
             ));
@@ -226,8 +236,13 @@ hosts:
         assert_eq!(manifest.version, 1);
         assert_eq!(manifest.runtime.local_store_dir, "./var/rendermesh/origins");
         assert_eq!(manifest.runtime.sync_interval_seconds, 60);
-        assert_eq!(manifest.origins["my_app"].bucket, "bucket_my_app_123");
-        assert_eq!(manifest.origins["my_app"].sync_interval_seconds, Some(30));
+        match &manifest.origins["my_app"] {
+            OriginConfig::S3(origin) => {
+                assert_eq!(origin.bucket, "bucket_my_app_123");
+                assert_eq!(origin.sync_interval_seconds, Some(30));
+            }
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
         assert_eq!(manifest.hosts["myapp.com"].origin, "my_app");
     }
 
@@ -267,8 +282,147 @@ hosts:
         .expect("json manifest parses");
 
         assert_eq!(manifest.version, 1);
-        assert_eq!(manifest.origins["my_app"].bucket, "bucket_my_app_123");
+        match &manifest.origins["my_app"] {
+            OriginConfig::S3(origin) => assert_eq!(origin.bucket, "bucket_my_app_123"),
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
         assert_eq!(manifest.hosts["*.myapp.com"].origin, "my_app");
+    }
+
+    #[test]
+    fn parses_local_origin_from_yaml() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  docs:
+    type: local
+    path: ./examples/local/bucket
+    sync_interval_seconds: 5
+hosts:
+  docs.test:
+    origin: docs
+"#,
+        )
+        .expect("local manifest parses");
+
+        match &manifest.origins["docs"] {
+            crate::dto::manifest::OriginConfig::Local(origin) => {
+                assert_eq!(origin.path, "./examples/local/bucket");
+                assert_eq!(origin.sync_interval_seconds, Some(5));
+            }
+            other => panic!("expected local origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_local_origin_from_json() {
+        let manifest = parse_manifest_config(
+            r#"
+{
+  "version": 1,
+  "runtime": {
+    "local_store_dir": "./var/rendermesh/origins",
+    "sync_interval_seconds": 60
+  },
+  "origins": {
+    "docs": {
+      "type": "local",
+      "path": "./examples/local/bucket",
+      "sync_interval_seconds": 5
+    }
+  },
+  "hosts": {
+    "docs.test": {
+      "origin": "docs"
+    }
+  }
+}
+"#,
+        )
+        .expect("local json manifest parses");
+
+        match &manifest.origins["docs"] {
+            crate::dto::manifest::OriginConfig::Local(origin) => {
+                assert_eq!(origin.path, "./examples/local/bucket");
+                assert_eq!(origin.sync_interval_seconds, Some(5));
+            }
+            other => panic!("expected local origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_local_origin_path() {
+        let yaml = r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  docs:
+    type: local
+    path: " "
+hosts:
+  docs.test:
+    origin: docs
+"#;
+
+        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
+            .expect("yaml parses");
+        let error = validate_manifest(&manifest).expect_err("validation fails");
+
+        assert!(error.to_string().contains("path is required"));
+    }
+
+    #[test]
+    fn rejects_local_origin_with_s3_fields() {
+        let error = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  docs:
+    type: local
+    path: ./docs
+    bucket: docs-bucket
+hosts:
+  docs.test:
+    origin: docs
+"#,
+        )
+        .expect_err("local origin rejects s3 field");
+
+        assert!(error.to_string().contains("bucket"));
+    }
+
+    #[test]
+    fn rejects_s3_origin_with_local_path_field() {
+        let error = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: s3
+    bucket: web-bucket
+    endpoint_env: WEB_ENDPOINT
+    region_env: WEB_REGION
+    path: ./web
+hosts:
+  web.test:
+    origin: web
+"#,
+        )
+        .expect_err("s3 origin rejects local path");
+
+        assert!(error.to_string().contains("path"));
     }
 
     #[test]
@@ -292,10 +446,14 @@ hosts:
         )
         .expect("manifest parses without static credential envs");
 
-        let origin = &manifest.origins["web"];
-        assert_eq!(origin.bucket, "web-bucket");
-        assert_eq!(origin.access_key_id_env, None);
-        assert_eq!(origin.secret_access_key_env, None);
+        match &manifest.origins["web"] {
+            OriginConfig::S3(origin) => {
+                assert_eq!(origin.bucket, "web-bucket");
+                assert_eq!(origin.access_key_id_env, None);
+                assert_eq!(origin.secret_access_key_env, None);
+            }
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -337,7 +495,10 @@ hosts:
             .expect("json manifest loads");
 
         assert_eq!(manifest.runtime.sync_interval_seconds, 45);
-        assert_eq!(manifest.origins["web"].bucket, "web-bucket");
+        match &manifest.origins["web"] {
+            OriginConfig::S3(origin) => assert_eq!(origin.bucket, "web-bucket"),
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
         assert_eq!(manifest.hosts["app.test"].origin, "web");
     }
 

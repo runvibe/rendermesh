@@ -3,9 +3,9 @@
 RenderMesh has two configuration layers:
 
 - A **global manifest** loaded from `RENDERMESH_MANIFEST`.
-- A per-origin **edge config** loaded from each bucket as YAML or JSON.
+- A per-origin **edge config** loaded from each origin source as YAML or JSON.
 
-This document covers the global manifest and environment variables. See [Origin Edge Config](edge-config.md) for bucket-level behavior.
+This document covers the global manifest and environment variables. See [Origin Edge Config](edge-config.md) for origin-level behavior.
 
 ## Environment Variables
 
@@ -17,7 +17,7 @@ Common runtime variables:
 - `APP_BODY_LIMIT_BYTES`: Request body read limit for fallback rendering. Defaults to `1048576`.
 - `OTEL_ENABLED`: Enables OpenTelemetry export when truthy. Defaults to enabled.
 
-Each origin references storage connection settings by environment variable name:
+S3 origins reference storage connection settings by environment variable name:
 
 - Endpoint: for example `MY_APP_STORAGE_ENDPOINT`.
 - Region: for example `MY_APP_STORAGE_REGION`.
@@ -58,16 +58,16 @@ hosts:
 
 ## `runtime`
 
-- `local_store_dir`: Directory where RenderMesh stores local bucket mirrors.
+- `local_store_dir`: Directory where RenderMesh stores local origin mirrors.
 - `sync_interval_seconds`: Default background sync interval for origins that do not override it.
 
 ## `origins`
 
 Each origin id must contain only ASCII letters, numbers, `_`, or `-`.
 
-Fields:
+S3 origin fields:
 
-- `type`: Currently `s3`.
+- `type`: `s3`.
 - `bucket`: Bucket name used by the storage provider.
 - `endpoint_env`: Environment variable containing the S3/R2 endpoint.
 - `region_env`: Environment variable containing the region.
@@ -99,6 +99,24 @@ origins:
     access_key_id_env: MY_APP_ACCESS_KEY_ID
     secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
 ```
+
+Local origin fields:
+
+- `type`: `local`.
+- `path`: Source directory for the origin.
+- `sync_interval_seconds`: Optional origin-specific sync interval.
+
+```yaml
+origins:
+  docs:
+    type: local
+    path: ./examples/local/bucket
+    sync_interval_seconds: 5
+```
+
+Absolute local paths are used as configured. Relative local paths are resolved from the directory containing the global manifest file. The path must exist and be a directory during startup.
+
+Local origins do not accept S3 fields such as `bucket`, `endpoint_env`, `region_env`, `access_key_id_env`, `secret_access_key_env`, or `force_path_style_env`.
 
 ## `hosts`
 

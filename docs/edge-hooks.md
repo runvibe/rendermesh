@@ -26,7 +26,7 @@ RenderMesh sends a `POST` request with JSON:
 
 ## `context`
 
-- `bucket`: Bucket name from the global manifest.
+- `bucket`: Bucket name for S3 origins. For local origins, RenderMesh currently sends the origin id for compatibility with the existing edge DTO.
 - `ip`: Client IP inferred from `x-forwarded-for` or `x-real-ip`; `null` when unavailable.
 - `origin`: Origin id from the global manifest.
 
@@ -64,7 +64,7 @@ RenderMesh stores safe response headers and continues normal delivery.
 }
 ```
 
-RenderMesh returns the edge body directly and does not read a file from the bucket.
+RenderMesh returns the edge body directly and does not read a file from the local mirror.
 
 ### Render Current Target With Params
 

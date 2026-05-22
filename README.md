@@ -1,33 +1,35 @@
 # RenderMesh
 
-RenderMesh is a Rust edge gateway for frontend applications served from S3/R2-compatible buckets.
-It sits between users, frontend assets, and programmable rendering middleware, then routes requests by host, mirrors bucket contents locally, applies edge rules, calls HTTP edge hooks, renders HTML templates when requested, and serves the final response with low latency.
+RenderMesh is a Rust edge gateway for frontend applications served from S3/R2-compatible buckets or local filesystem origins.
+It sits between users, frontend assets, and programmable rendering middleware, then routes requests by host, mirrors origin contents locally, applies edge rules, calls HTTP edge hooks, renders HTML templates when requested, and serves the final response with low latency.
 
 ## Motivation
 
 Modern frontend delivery often needs more than static file hosting. Teams need host-based routing, bucket-backed deployments, intelligent fallbacks, redirects, rewrites, HTML customization, observability, and programmable request-time decisions without coupling every frontend application to a specific infrastructure provider.
 
-RenderMesh exists to provide that middle layer. The goal is to keep frontend artifacts portable in buckets while moving delivery concerns into a fast Rust gateway:
+RenderMesh exists to provide that middle layer. The goal is to keep frontend artifacts portable in buckets or mounted local directories while moving delivery concerns into a fast Rust gateway:
 
-- Bucket contents remain the source of frontend files.
+- Origin contents remain the source of frontend files.
 - Hosts map explicitly to origins.
 - CORS is derived from the host map.
 - Edge behavior lives beside each origin in YAML or JSON config files.
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
+- Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
+- Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
 ## Project Status
 
-This repository contains the RenderMesh MVP. It intentionally does not include PostgreSQL, MCP, OpenAPI, or Swagger UI. The current runtime focuses on the static edge gateway, local bucket mirroring, edge configuration, edge hooks, HTML-only template rendering, and OpenTelemetry.
+This repository contains the RenderMesh MVP. It intentionally does not include PostgreSQL, MCP, OpenAPI, or Swagger UI. The current runtime focuses on the static edge gateway, local origin mirroring, edge configuration, edge hooks, HTML-only template rendering, and OpenTelemetry.
 
 ## Summary
 
 - [Overview](docs/overview.md): product concepts, request lifecycle, and MVP scope.
-- [Configuration](docs/configuration.md): global manifest, environment variables, origins, hosts, and bucket credentials.
+- [Configuration](docs/configuration.md): global manifest, environment variables, S3 origins, local origins, hosts, and credentials.
 - [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
-- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, local filesystem layout, and refresh behavior.
+- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, and refresh behavior.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
 - [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.
@@ -82,7 +84,7 @@ See [examples/local/README.md](examples/local/README.md) for every route in the 
 
 ## Minimal Global Manifest
 
-`RENDERMESH_MANIFEST` points to the global bootstrap config. YAML and JSON are both accepted. Bucket credentials stay in environment variables so the manifest can be reused safely across environments.
+`RENDERMESH_MANIFEST` points to the global bootstrap config. YAML and JSON are both accepted. S3 credentials stay in environment variables so the manifest can be reused safely across environments.
 
 ```yaml
 version: 1
@@ -111,9 +113,25 @@ Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdire
 
 For AWS environments, omit `access_key_id_env` and `secret_access_key_env` to use the AWS SDK default credential chain, including EKS IRSA. For S3-compatible local labs or providers that require static credentials, configure both fields.
 
+Local origins use a host filesystem path instead of bucket credentials:
+
+```yaml
+origins:
+  docs:
+    type: local
+    path: ./examples/local/bucket
+    sync_interval_seconds: 5
+
+hosts:
+  docs.test:
+    origin: docs
+```
+
+Relative local origin paths are resolved from the directory containing the global manifest. Local origins are still mirrored into `runtime.local_store_dir` before traffic is served.
+
 ## Minimal Origin Edge Config
 
-Each origin can include `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` in its bucket:
+Each origin can include `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` in its source:
 
 ```yaml
 version: 1
@@ -173,7 +191,7 @@ The local lab also validates the full bucket and edge flow with MinIO and a smal
 src/routes/        HTTP transport wiring
 src/dto/           request, response, manifest, and edge contracts
 src/services/      business rules and orchestration
-src/repositories/  local mirror, S3/R2, sync, and HTTP adapters
+src/repositories/  local mirror, local/S3/R2 storage, sync, and HTTP adapters
 examples/local/    runnable local bucket lab
 docs/              project documentation
 ```

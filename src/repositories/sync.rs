@@ -7,14 +7,21 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 
-use crate::repositories::local_mirror::{
-    metadata_sidecar_path, LocalMirrorRepository, ObjectMetadata, METADATA_DIR_NAME,
+use crate::{
+    repositories::local_mirror::{
+        metadata_sidecar_path, LocalMirrorRepository, ObjectMetadata, METADATA_DIR_NAME,
+    },
+    services::freshness::{
+        build_origin_index, diff_origin_indexes, OriginFreshnessDiff, OriginFreshnessIndex,
+    },
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RemoteObjectSummary {
     pub key: String,
+    pub created_at: Option<String>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
     pub size: u64,
@@ -48,6 +55,15 @@ pub struct SyncReport {
     pub downloaded: usize,
 }
 
+#[derive(Clone, Debug)]
+pub struct StagedOriginSync {
+    pub origin_id: String,
+    pub staging_dir: PathBuf,
+    pub index: OriginFreshnessIndex,
+    pub diff: OriginFreshnessDiff,
+    pub report: SyncReport,
+}
+
 impl MirrorSyncService {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
@@ -78,6 +94,45 @@ impl MirrorSyncService {
         Ok(report)
     }
 
+    pub async fn stage_origin_sync<S>(
+        &self,
+        origin_id: &str,
+        storage: &S,
+        previous_index: Option<&OriginFreshnessIndex>,
+    ) -> Result<StagedOriginSync>
+    where
+        S: RemoteStorage,
+    {
+        let origin_dir = LocalMirrorRepository::new(self.root.clone()).origin_dir(origin_id)?;
+        let staging_dir = self.staging_dir(origin_id)?;
+        prepare_staging_dir(&origin_dir, &staging_dir).await?;
+
+        let result = stage_origin_dir(origin_id, &staging_dir, storage, previous_index).await;
+        match result {
+            Ok((index, diff, report)) => Ok(StagedOriginSync {
+                origin_id: origin_id.to_string(),
+                staging_dir,
+                index,
+                diff,
+                report,
+            }),
+            Err(error) => {
+                remove_dir_if_exists(&staging_dir).await?;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn activate_staged_origin(&self, staged: StagedOriginSync) -> Result<()> {
+        let origin_dir =
+            LocalMirrorRepository::new(self.root.clone()).origin_dir(&staged.origin_id)?;
+        if let Err(error) = swap_origin_dir(&origin_dir, &staged.staging_dir).await {
+            remove_dir_if_exists(&staged.staging_dir).await?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
     fn staging_dir(&self, origin_id: &str) -> Result<PathBuf> {
         LocalMirrorRepository::new(self.root.clone()).origin_dir(origin_id)?;
         let timestamp = SystemTime::now()
@@ -89,6 +144,37 @@ impl MirrorSyncService {
             .join(".rendermesh-sync")
             .join(format!("{origin_id}-{}-{timestamp}", std::process::id())))
     }
+}
+
+async fn stage_origin_dir<S>(
+    origin_id: &str,
+    origin_dir: &Path,
+    storage: &S,
+    previous_index: Option<&OriginFreshnessIndex>,
+) -> Result<(OriginFreshnessIndex, OriginFreshnessDiff, SyncReport)>
+where
+    S: RemoteStorage,
+{
+    tokio::fs::create_dir_all(origin_dir)
+        .await
+        .with_context(|| format!("create origin mirror {}", origin_dir.display()))?;
+
+    let summaries = storage.list_objects().await?;
+    let index = build_origin_index(origin_id, summaries, Utc::now())?;
+    let diff = diff_origin_indexes(previous_index, &index);
+    let remote_keys = index.files.keys().cloned().collect::<BTreeSet<_>>();
+    let mut downloaded = 0usize;
+
+    for key in diff.changed_paths() {
+        let object = storage.get_object(key).await?;
+        write_object(origin_dir, object).await?;
+        downloaded += 1;
+    }
+
+    remove_deleted_objects(origin_dir, &remote_keys).await?;
+    remove_orphan_metadata_sidecars(origin_dir, &remote_keys).await?;
+
+    Ok((index, diff, SyncReport { downloaded }))
 }
 
 async fn sync_origin_dir<S>(origin_dir: &Path, storage: &S) -> Result<SyncReport>
@@ -396,7 +482,7 @@ fn object_path(origin_dir: &Path, key: &str) -> Result<PathBuf> {
     }
 }
 
-fn normalize_remote_key(key: &str) -> Result<String> {
+pub(crate) fn normalize_remote_key(key: &str) -> Result<String> {
     if key.is_empty() || key.starts_with('/') || key.chars().any(char::is_control) {
         return Err(anyhow!("invalid object path {key}"));
     }
@@ -466,6 +552,7 @@ mod tests {
                 .values()
                 .map(|object| RemoteObjectSummary {
                     key: object.key.clone(),
+                    created_at: None,
                     etag: object.etag.clone(),
                     last_modified: object.last_modified.clone(),
                     size: object.body.len() as u64,
@@ -484,6 +571,28 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("missing"))
         }
+    }
+
+    fn remote_object(
+        key: &str,
+        body: &str,
+        etag: Option<&str>,
+        content_type: Option<&str>,
+    ) -> RemoteObject {
+        RemoteObject {
+            key: key.to_string(),
+            body: Bytes::from(body.to_string()),
+            etag: etag.map(str::to_string),
+            last_modified: None,
+            content_type: content_type.map(str::to_string),
+            cache_control: None,
+        }
+    }
+
+    async fn requested_keys(storage: &FakeStorage) -> Vec<String> {
+        let mut keys = storage.requested_keys.lock().await.clone();
+        keys.sort();
+        keys
     }
 
     #[tokio::test]
@@ -518,6 +627,96 @@ mod tests {
         let metadata_path = metadata_sidecar_path(&temp.path().join("origins/web"), "index.html")
             .expect("metadata path");
         assert!(metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn staged_sync_fetches_only_changed_files_and_waits_for_activation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let syncer = MirrorSyncService::new(temp.path().join("origins"));
+        let storage = FakeStorage::default();
+        storage.objects.lock().await.insert(
+            "index.html".to_string(),
+            remote_object(
+                "index.html",
+                "old index",
+                Some("index-v1"),
+                Some("text/html"),
+            ),
+        );
+        storage.objects.lock().await.insert(
+            "same.css".to_string(),
+            remote_object("same.css", "body{}", Some("same-v1"), Some("text/css")),
+        );
+        storage.objects.lock().await.insert(
+            "removed.html".to_string(),
+            remote_object(
+                "removed.html",
+                "removed",
+                Some("removed-v1"),
+                Some("text/html"),
+            ),
+        );
+        syncer
+            .sync_origin("web", &storage)
+            .await
+            .expect("initial sync");
+        let previous_index = crate::services::freshness::build_origin_index(
+            "web",
+            storage.list_objects().await.expect("list previous"),
+            chrono::Utc::now(),
+        )
+        .expect("previous index");
+        storage.requested_keys.lock().await.clear();
+
+        storage.objects.lock().await.insert(
+            "index.html".to_string(),
+            remote_object(
+                "index.html",
+                "new index",
+                Some("index-v2"),
+                Some("text/html"),
+            ),
+        );
+        storage.objects.lock().await.remove("removed.html");
+        storage.objects.lock().await.insert(
+            "new.html".to_string(),
+            remote_object("new.html", "new", Some("new-v1"), Some("text/html")),
+        );
+
+        let staged = syncer
+            .stage_origin_sync("web", &storage, Some(&previous_index))
+            .await
+            .expect("stage sync");
+
+        assert_eq!(staged.report.downloaded, 2);
+        assert!(staged.diff.modified.contains("index.html"));
+        assert!(staged.diff.added.contains("new.html"));
+        assert!(staged.diff.removed.contains("removed.html"));
+        assert!(staged.diff.unchanged.contains("same.css"));
+        assert_eq!(
+            tokio::fs::read_to_string(temp.path().join("origins/web/index.html"))
+                .await
+                .expect("read active index"),
+            "old index"
+        );
+        assert_eq!(
+            requested_keys(&storage).await,
+            vec!["index.html".to_string(), "new.html".to_string()]
+        );
+
+        syncer
+            .activate_staged_origin(staged)
+            .await
+            .expect("activate");
+
+        assert_eq!(
+            tokio::fs::read_to_string(temp.path().join("origins/web/index.html"))
+                .await
+                .expect("read activated index"),
+            "new index"
+        );
+        assert!(temp.path().join("origins/web/new.html").exists());
+        assert!(!temp.path().join("origins/web/removed.html").exists());
     }
 
     #[tokio::test]
@@ -825,6 +1024,7 @@ mod tests {
                 .values()
                 .map(|object| RemoteObjectSummary {
                     key: object.key.clone(),
+                    created_at: None,
                     etag: object.etag.clone(),
                     last_modified: object.last_modified.clone(),
                     size: object.body.len() as u64,
