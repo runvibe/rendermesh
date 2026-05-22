@@ -1,13 +1,13 @@
 # Local Mirror And Sync
 
-RenderMesh serves runtime traffic from local bucket mirrors. It does not fetch bucket objects directly during normal request handling.
+RenderMesh serves runtime traffic from local origin mirrors. It does not fetch source objects directly during normal request handling.
 
 ## Startup Sync
 
 At startup, RenderMesh:
 
 1. Loads the global manifest.
-2. Creates one S3-compatible storage adapter per origin.
+2. Creates one storage adapter per origin.
 3. Lists each configured origin and builds an in-memory freshness index.
 4. Stages changed origin files under `.rendermesh-sync`.
 5. Loads each staged origin's edge config from `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
@@ -27,6 +27,7 @@ runtime:
   local_store_dir: ./var/rendermesh/origins
 origins:
   my_app:
+    type: s3
     bucket: bucket_my_app_123
 ```
 
@@ -51,6 +52,8 @@ Failed background syncs are logged and the previous local mirror, edge config, f
 
 RenderMesh keeps an in-memory freshness index per origin. The index records each known source path plus metadata such as size, ETag, last-modified value, content type, cache-control value, optional creation time, and the time RenderMesh captured the listing.
 
+Local directory origins generate content-hash ETags (`sha256:<digest>`) during listing, so same-size edits are still detected on the next refresh.
+
 On each refresh, RenderMesh lists the source again and classifies paths as:
 
 - `added`
@@ -63,6 +66,20 @@ Only added and modified paths are fetched from the source provider. Removed path
 ## Atomic Activation
 
 Refresh writes into a staging directory first. RenderMesh parses edge config and compiles template updates from the staging directory before activation. If any required step fails, the previous generation remains active.
+
+Each successful activation increments the origin generation exposed by the runtime debug API.
+
+## Runtime Debug API
+
+RenderMesh exposes the current in-memory snapshot for origin refresh state:
+
+```text
+GET /_rendermesh/origins
+GET /_rendermesh/origins/{origin_id}/snapshot
+GET /_rendermesh/origins/{origin_id}/freshness
+```
+
+Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, and the last background refresh error when present.
 
 ## Refresh Behavior
 
@@ -79,4 +96,4 @@ Template compilation is incremental. Added or modified HTML candidates are compi
 
 ## Deleted Objects
 
-Objects missing from the remote bucket are removed from the local mirror during refresh. Removed HTML templates are also removed from the in-memory template registry after successful activation.
+Objects missing from the source are removed from the local mirror during refresh. Removed HTML templates are also removed from the in-memory template registry after successful activation.

@@ -11,7 +11,7 @@ use crate::{
     dto::manifest::RenderMeshManifest,
     repositories::{
         local_mirror::LocalMirrorRepository, manifest::ManifestRepository,
-        s3_storage::S3StorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
+        origin_storage::OriginStorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
     },
     services::{
         cors::CorsPolicy,
@@ -19,6 +19,7 @@ use crate::{
         edge_config_store::EdgeConfigStore,
         freshness::OriginFreshnessIndex,
         manifest::{load_manifest, HostResolver},
+        origin_runtime::{OriginRuntimeStore, OriginSnapshotDebug},
         render_gateway::RenderGatewayService,
         template_store::TemplateStore,
     },
@@ -32,17 +33,31 @@ const EDGE_CONFIG_PATHS: [&str; 3] = [
 
 type OriginFreshnessIndexes = Arc<RwLock<BTreeMap<String, OriginFreshnessIndex>>>;
 
+pub struct RenderRuntime {
+    pub render_gateway: RenderGatewayService,
+    pub origin_runtime: OriginRuntimeStore,
+}
+
 pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewayService> {
+    Ok(build_render_runtime(manifest_path).await?.render_gateway)
+}
+
+pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> {
     let manifest = load_manifest(&ManifestRepository::new(), manifest_path).await?;
+    let manifest_dir = Path::new(manifest_path)
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mirror = LocalMirrorRepository::new(&manifest.runtime.local_store_dir);
     let syncer = MirrorSyncService::new(&manifest.runtime.local_store_dir);
     let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
     let template_store = TemplateStore::default();
     let freshness_indexes = OriginFreshnessIndexes::default();
+    let origin_runtime = OriginRuntimeStore::default();
 
     let mut storage_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
-        let storage = S3StorageRepository::from_origin_config(origin).await?;
+        let storage = OriginStorageRepository::from_origin_config(origin, manifest_dir).await?;
         let report = refresh_origin_snapshot(
             origin_id,
             &syncer,
@@ -50,6 +65,7 @@ pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewaySe
             &edge_configs,
             &template_store,
             &freshness_indexes,
+            &origin_runtime,
         )
         .await?;
         tracing::info!(
@@ -66,24 +82,30 @@ pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewaySe
         edge_configs.clone(),
         template_store.clone(),
         freshness_indexes,
+        origin_runtime.clone(),
         storage_by_origin,
     );
 
-    Ok(RenderGatewayService::new_with_stores_and_origin_buckets(
+    let render_gateway = RenderGatewayService::new_with_stores_and_origin_buckets(
         HostResolver::new(&manifest)?,
         CorsPolicy::from_manifest(&manifest),
         mirror,
         edge_configs,
         template_store,
         origin_buckets(&manifest),
-    ))
+    );
+
+    Ok(RenderRuntime {
+        render_gateway,
+        origin_runtime,
+    })
 }
 
 fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
     manifest
         .origins
         .iter()
-        .map(|(origin_id, origin)| (origin_id.clone(), origin.bucket.clone()))
+        .map(|(origin_id, origin)| (origin_id.clone(), origin.edge_context_bucket(origin_id)))
         .collect()
 }
 
@@ -115,6 +137,7 @@ where
     S: RemoteStorage,
 {
     let freshness_indexes = OriginFreshnessIndexes::default();
+    let origin_runtime = OriginRuntimeStore::default();
     let report = refresh_origin_snapshot(
         origin_id,
         syncer,
@@ -122,6 +145,7 @@ where
         edge_configs,
         template_store,
         &freshness_indexes,
+        &origin_runtime,
     )
     .await?;
     tracing::info!(
@@ -139,6 +163,7 @@ pub(crate) async fn refresh_origin_snapshot<S>(
     edge_configs: &EdgeConfigStore,
     template_store: &TemplateStore,
     freshness_indexes: &OriginFreshnessIndexes,
+    origin_runtime: &OriginRuntimeStore,
 ) -> Result<crate::repositories::sync::SyncReport>
 where
     S: RemoteStorage,
@@ -163,8 +188,27 @@ where
         .await?;
     let next_index = staged.index.clone();
     let report = staged.report.clone();
+    let next_generation = origin_runtime
+        .get(origin_id)
+        .map(|snapshot| snapshot.generation + 1)
+        .unwrap_or(1);
+    let activated_at = chrono::Utc::now().to_rfc3339();
+    let snapshot = OriginSnapshotDebug {
+        origin_id: origin_id.to_string(),
+        generation: next_generation,
+        activated_at,
+        captured_at: next_index.captured_at.to_rfc3339(),
+        known_files: next_index.files.len(),
+        added_files: staged.diff.added.len(),
+        modified_files: staged.diff.modified.len(),
+        removed_files: staged.diff.removed.len(),
+        unchanged_files: staged.diff.unchanged.len(),
+        downloaded_files: report.downloaded,
+        last_error: None,
+    };
     tracing::info!(
         origin = %origin_id,
+        generation = next_generation,
         listed_files = staged.index.files.len(),
         added_files = staged.diff.added.len(),
         modified_files = staged.diff.modified.len(),
@@ -181,7 +225,8 @@ where
         .write()
         .expect("freshness index lock")
         .insert(origin_id.to_string(), next_index);
-    tracing::info!(origin = %origin_id, "origin freshness refresh activated");
+    origin_runtime.set_snapshot(snapshot);
+    tracing::info!(origin = %origin_id, generation = next_generation, "origin freshness refresh activated");
 
     Ok(report)
 }
@@ -236,17 +281,19 @@ fn spawn_background_sync(
     edge_configs: EdgeConfigStore,
     template_store: TemplateStore,
     freshness_indexes: OriginFreshnessIndexes,
-    storage_by_origin: BTreeMap<String, S3StorageRepository>,
+    origin_runtime: OriginRuntimeStore,
+    storage_by_origin: BTreeMap<String, OriginStorageRepository>,
 ) {
     for (origin_id, storage) in storage_by_origin {
         let syncer = syncer.clone();
         let edge_configs = edge_configs.clone();
         let template_store = template_store.clone();
         let freshness_indexes = freshness_indexes.clone();
+        let origin_runtime = origin_runtime.clone();
         let interval_seconds = manifest
             .origins
             .get(&origin_id)
-            .and_then(|origin| origin.sync_interval_seconds)
+            .and_then(|origin| origin.sync_interval_seconds())
             .unwrap_or(manifest.runtime.sync_interval_seconds);
 
         tokio::spawn(async move {
@@ -260,9 +307,11 @@ fn spawn_background_sync(
                     &edge_configs,
                     &template_store,
                     &freshness_indexes,
+                    &origin_runtime,
                 )
                 .await
                 {
+                    origin_runtime.set_error(&origin_id, error.to_string());
                     tracing::error!(origin = %origin_id, "background origin sync failed: {error}");
                 }
             }
@@ -598,6 +647,113 @@ missing:
                 .render("web", "/index.html", &serde_json::json!({"title":"Stable"}))
                 .expect("old template still renders"),
             "<h1>Stable</h1>"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_origin_snapshot_updates_runtime_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let syncer = MirrorSyncService::new(&root);
+        let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
+        let template_store = TemplateStore::default();
+        let freshness_indexes = OriginFreshnessIndexes::default();
+        let origin_runtime = crate::services::origin_runtime::OriginRuntimeStore::default();
+        let storage = StaticStorage::new(BTreeMap::from([(
+            "index.html".to_string(),
+            RemoteObject {
+                key: "index.html".to_string(),
+                body: Bytes::from_static(b"<h1>{{title}}</h1>"),
+                etag: Some("index-v1".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            },
+        )]));
+
+        refresh_origin_snapshot(
+            "web",
+            &syncer,
+            &storage,
+            &edge_configs,
+            &template_store,
+            &freshness_indexes,
+            &origin_runtime,
+        )
+        .await
+        .expect("refresh succeeds");
+
+        let snapshot = origin_runtime.get("web").expect("runtime snapshot");
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.known_files, 1);
+        assert_eq!(snapshot.added_files, 1);
+        assert_eq!(snapshot.downloaded_files, 1);
+        assert_eq!(snapshot.last_error, None);
+    }
+
+    #[tokio::test]
+    async fn build_render_runtime_syncs_local_origin_relative_to_manifest_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let source_dir = config_dir.join("site");
+        let mirror_dir = temp.path().join("var/origins");
+        tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+            .await
+            .expect("create source dir");
+        tokio::fs::write(source_dir.join("index.html"), "<h1>{{title}}</h1>")
+            .await
+            .expect("write index");
+        tokio::fs::write(
+            source_dir.join("_rendermesh/edge.yaml"),
+            r#"
+version: 1
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+missing:
+  action: not_found
+  page: /index.html
+"#,
+        )
+        .await
+        .expect("write edge config");
+
+        let manifest_path = config_dir.join("rendermesh.yaml");
+        tokio::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: local
+    path: ./site
+hosts:
+  web.test:
+    origin: web
+"#,
+                mirror_dir.display()
+            ),
+        )
+        .await
+        .expect("write manifest");
+
+        let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+            .await
+            .expect("runtime builds");
+
+        let snapshot = runtime.origin_runtime.get("web").expect("origin snapshot");
+        assert_eq!(snapshot.generation, 1);
+        assert_eq!(snapshot.known_files, 2);
+        assert_eq!(snapshot.downloaded_files, 2);
+        assert_eq!(
+            tokio::fs::read_to_string(mirror_dir.join("web/index.html"))
+                .await
+                .expect("mirror index exists"),
+            "<h1>{{title}}</h1>"
         );
     }
 

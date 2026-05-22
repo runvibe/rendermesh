@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::services::render_gateway::RenderGatewayService;
+use crate::services::{origin_runtime::OriginRuntimeStore, render_gateway::RenderGatewayService};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -9,11 +9,22 @@ pub struct AppState {
 
 struct SharedState {
     pub render_gateway: RenderGatewayService,
+    pub origin_runtime: OriginRuntimeStore,
 }
 
 impl AppState {
     pub fn new(render_gateway: RenderGatewayService) -> Self {
-        let inner = SharedState { render_gateway };
+        Self::new_with_runtime(render_gateway, OriginRuntimeStore::default())
+    }
+
+    pub fn new_with_runtime(
+        render_gateway: RenderGatewayService,
+        origin_runtime: OriginRuntimeStore,
+    ) -> Self {
+        let inner = SharedState {
+            render_gateway,
+            origin_runtime,
+        };
         Self {
             inner: Arc::new(inner),
         }
@@ -21,6 +32,10 @@ impl AppState {
 
     pub fn render_gateway(&self) -> RenderGatewayService {
         self.inner.render_gateway.clone()
+    }
+
+    pub fn origin_runtime(&self) -> OriginRuntimeStore {
+        self.inner.origin_runtime.clone()
     }
 }
 

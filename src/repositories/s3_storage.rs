@@ -6,7 +6,7 @@ use aws_sdk_s3::{config::Region, Client};
 use bytes::Bytes;
 
 use crate::{
-    dto::manifest::OriginConfig,
+    dto::manifest::S3OriginConfig,
     repositories::sync::{RemoteObject, RemoteObjectSummary, RemoteStorage},
 };
 
@@ -17,7 +17,7 @@ pub struct S3StorageRepository {
 }
 
 impl S3StorageRepository {
-    pub async fn from_origin_config(origin: &OriginConfig) -> Result<Self> {
+    pub async fn from_origin_config(origin: &S3OriginConfig) -> Result<Self> {
         let endpoint = std::env::var(&origin.endpoint_env)
             .with_context(|| format!("read S3 endpoint env {}", origin.endpoint_env))?;
         let region = std::env::var(&origin.region_env)
@@ -112,8 +112,7 @@ mod tests {
         let _secret_key = EnvVarGuard::set("TEST_S3_SECRET_ACCESS_KEY", "rendermesh-secret");
         let _force_path_style = EnvVarGuard::set("TEST_S3_FORCE_PATH_STYLE", "true");
 
-        let origin = OriginConfig {
-            origin_type: crate::dto::manifest::OriginType::S3,
+        let origin = S3OriginConfig {
             bucket: "rendermesh-local".to_string(),
             endpoint_env: "TEST_S3_ENDPOINT".to_string(),
             region_env: "TEST_S3_REGION".to_string(),
@@ -133,8 +132,7 @@ mod tests {
         let _endpoint = EnvVarGuard::set("TEST_S3_ENDPOINT", "https://s3.us-east-1.amazonaws.com");
         let _region = EnvVarGuard::set("TEST_S3_REGION", "us-east-1");
 
-        let origin = OriginConfig {
-            origin_type: crate::dto::manifest::OriginType::S3,
+        let origin = S3OriginConfig {
             bucket: "rendermesh-prod".to_string(),
             endpoint_env: "TEST_S3_ENDPOINT".to_string(),
             region_env: "TEST_S3_REGION".to_string(),

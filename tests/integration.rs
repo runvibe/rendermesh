@@ -28,6 +28,7 @@ use rendermesh::{
         cors::CorsPolicy,
         edge_config::default_edge_config,
         manifest::{parse_manifest_yaml, HostResolver},
+        origin_runtime::{OriginRuntimeStore, OriginSnapshotDebug},
         render_gateway::RenderGatewayService,
     },
 };
@@ -51,7 +52,21 @@ async fn setup_router() -> Router {
 
 fn setup_render_router(temp_root: &Path) -> Router {
     let gateway = test_render_gateway(&temp_root.join("origins"));
-    let state = AppState::new(gateway);
+    let runtime = OriginRuntimeStore::default();
+    runtime.set_snapshot(OriginSnapshotDebug {
+        origin_id: "web".to_string(),
+        generation: 7,
+        activated_at: "2026-05-22T14:00:00Z".to_string(),
+        captured_at: "2026-05-22T13:59:59Z".to_string(),
+        known_files: 2,
+        added_files: 1,
+        modified_files: 0,
+        removed_files: 0,
+        unchanged_files: 1,
+        downloaded_files: 1,
+        last_error: None,
+    });
+    let state = AppState::new_with_runtime(gateway, runtime);
     let config = AppConfig {
         host: IpAddr::V4(Ipv4Addr::LOCALHOST),
         port: 0,
@@ -62,6 +77,46 @@ fn setup_render_router(temp_root: &Path) -> Router {
     };
 
     create_router(state, &config)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_origin_routes_expose_runtime_snapshot() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/_rendermesh/origins")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["origins"][0]["origin_id"], "web");
+    assert_eq!(body["origins"][0]["generation"], 7);
+    assert_eq!(body["origins"][0]["known_files"], 2);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/_rendermesh/origins/web/freshness")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["origin_id"], "web");
+    assert_eq!(body["added_files"], 1);
 }
 
 fn test_render_gateway(mirror_root: &Path) -> RenderGatewayService {

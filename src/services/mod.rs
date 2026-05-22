@@ -7,6 +7,7 @@ pub mod edge_hooks;
 pub mod freshness;
 pub mod health;
 pub mod manifest;
+pub mod origin_runtime;
 pub mod render_gateway;
 pub mod startup;
 pub mod static_rules;
