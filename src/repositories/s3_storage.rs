@@ -192,6 +192,7 @@ impl RemoteStorage for S3StorageRepository {
                 if let Some(key) = object.key() {
                     output.push(RemoteObjectSummary {
                         key: key.to_string(),
+                        created_at: None,
                         etag: object.e_tag().map(ToString::to_string),
                         last_modified: object.last_modified().map(ToString::to_string),
                         size: object.size().unwrap_or_default() as u64,

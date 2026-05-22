@@ -15,6 +15,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - Edge behavior lives beside each origin in YAML or JSON config files.
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
+- Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
 ## Project Status
@@ -27,7 +28,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Configuration](docs/configuration.md): global manifest, environment variables, origins, hosts, and bucket credentials.
 - [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
-- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, local filesystem layout, and refresh behavior.
+- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, and refresh behavior.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
 - [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.

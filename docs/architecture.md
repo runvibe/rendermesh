@@ -52,6 +52,7 @@ Services own business rules and orchestration:
 - Edge payload application.
 - Render gateway orchestration.
 - Startup sync orchestration.
+- Origin freshness indexing and staged refresh activation.
 - Template compilation and rendering.
 
 Important files:

@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::Path,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use anyhow::Result;
 
@@ -12,6 +17,7 @@ use crate::{
         cors::CorsPolicy,
         edge_config::{default_edge_config, parse_edge_config},
         edge_config_store::EdgeConfigStore,
+        freshness::OriginFreshnessIndex,
         manifest::{load_manifest, HostResolver},
         render_gateway::RenderGatewayService,
         template_store::TemplateStore,
@@ -24,15 +30,28 @@ const EDGE_CONFIG_PATHS: [&str; 3] = [
     "/_rendermesh/edge.json",
 ];
 
+type OriginFreshnessIndexes = Arc<RwLock<BTreeMap<String, OriginFreshnessIndex>>>;
+
 pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewayService> {
     let manifest = load_manifest(&ManifestRepository::new(), manifest_path).await?;
     let mirror = LocalMirrorRepository::new(&manifest.runtime.local_store_dir);
     let syncer = MirrorSyncService::new(&manifest.runtime.local_store_dir);
+    let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
+    let template_store = TemplateStore::default();
+    let freshness_indexes = OriginFreshnessIndexes::default();
 
     let mut storage_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
         let storage = S3StorageRepository::from_origin_config(origin).await?;
-        let report = syncer.sync_origin(origin_id, &storage).await?;
+        let report = refresh_origin_snapshot(
+            origin_id,
+            &syncer,
+            &storage,
+            &edge_configs,
+            &template_store,
+            &freshness_indexes,
+        )
+        .await?;
         tracing::info!(
             origin = %origin_id,
             downloaded = report.downloaded,
@@ -41,14 +60,12 @@ pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewaySe
         storage_by_origin.insert(origin_id.clone(), storage);
     }
 
-    let edge_configs = load_edge_configs(manifest.origins.keys().cloned(), &mirror).await;
-    let template_store = load_templates(manifest.origins.keys().cloned(), &mirror).await?;
     spawn_background_sync(
         manifest.clone(),
         syncer,
-        mirror.clone(),
         edge_configs.clone(),
         template_store.clone(),
+        freshness_indexes,
         storage_by_origin,
     );
 
@@ -70,6 +87,7 @@ fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) async fn load_edge_configs<I>(
     origin_ids: I,
     mirror: &LocalMirrorRepository,
@@ -84,44 +102,102 @@ where
     store
 }
 
+#[cfg(test)]
 pub(crate) async fn sync_origin_and_refresh_edge_config<S>(
     origin_id: &str,
     syncer: &MirrorSyncService,
     storage: &S,
-    mirror: &LocalMirrorRepository,
+    _mirror: &LocalMirrorRepository,
     edge_configs: &EdgeConfigStore,
     template_store: &TemplateStore,
 ) -> Result<()>
 where
     S: RemoteStorage,
 {
-    let report = syncer.sync_origin(origin_id, storage).await?;
+    let freshness_indexes = OriginFreshnessIndexes::default();
+    let report = refresh_origin_snapshot(
+        origin_id,
+        syncer,
+        storage,
+        edge_configs,
+        template_store,
+        &freshness_indexes,
+    )
+    .await?;
     tracing::info!(
         origin = %origin_id,
         downloaded = report.downloaded,
         "origin sync completed"
     );
-    refresh_edge_config(origin_id, mirror, edge_configs).await;
-    template_store
-        .load_origin_templates(origin_id, mirror)
-        .await?;
     Ok(())
 }
 
-pub(crate) async fn load_templates<I>(
-    origin_ids: I,
-    mirror: &LocalMirrorRepository,
-) -> Result<TemplateStore>
+pub(crate) async fn refresh_origin_snapshot<S>(
+    origin_id: &str,
+    syncer: &MirrorSyncService,
+    storage: &S,
+    edge_configs: &EdgeConfigStore,
+    template_store: &TemplateStore,
+    freshness_indexes: &OriginFreshnessIndexes,
+) -> Result<crate::repositories::sync::SyncReport>
 where
-    I: IntoIterator<Item = String>,
+    S: RemoteStorage,
 {
-    let store = TemplateStore::default();
-    for origin_id in origin_ids {
-        store.load_origin_templates(&origin_id, mirror).await?;
-    }
-    Ok(store)
+    let previous_index = freshness_indexes
+        .read()
+        .expect("freshness index lock")
+        .get(origin_id)
+        .cloned();
+    let staged = syncer
+        .stage_origin_sync(origin_id, storage, previous_index.as_ref())
+        .await?;
+    let (stage_mirror, stage_origin_id) = staged_origin_mirror(&staged.staging_dir)?;
+    let edge_config = load_origin_edge_config(&stage_origin_id, &stage_mirror).await?;
+    let template_registry = template_store
+        .compile_template_update_from_mirror(
+            origin_id,
+            &stage_origin_id,
+            &stage_mirror,
+            &staged.diff,
+        )
+        .await?;
+    let next_index = staged.index.clone();
+    let report = staged.report.clone();
+    tracing::info!(
+        origin = %origin_id,
+        listed_files = staged.index.files.len(),
+        added_files = staged.diff.added.len(),
+        modified_files = staged.diff.modified.len(),
+        removed_files = staged.diff.removed.len(),
+        unchanged_files = staged.diff.unchanged.len(),
+        downloaded = report.downloaded,
+        "origin freshness refresh staged"
+    );
+
+    syncer.activate_staged_origin(staged).await?;
+    edge_configs.set_valid(origin_id, edge_config);
+    template_store.set_origin_registry(origin_id, template_registry);
+    freshness_indexes
+        .write()
+        .expect("freshness index lock")
+        .insert(origin_id.to_string(), next_index);
+    tracing::info!(origin = %origin_id, "origin freshness refresh activated");
+
+    Ok(report)
 }
 
+fn staged_origin_mirror(staging_dir: &Path) -> Result<(LocalMirrorRepository, String)> {
+    let root = staging_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("staging dir has no parent"))?;
+    let origin_id = staging_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("staging dir has invalid origin id"))?;
+    Ok((LocalMirrorRepository::new(root), origin_id.to_string()))
+}
+
+#[cfg(test)]
 async fn refresh_edge_config(
     origin_id: &str,
     mirror: &LocalMirrorRepository,
@@ -157,16 +233,16 @@ async fn load_origin_edge_config(
 fn spawn_background_sync(
     manifest: Arc<RenderMeshManifest>,
     syncer: MirrorSyncService,
-    mirror: LocalMirrorRepository,
     edge_configs: EdgeConfigStore,
     template_store: TemplateStore,
+    freshness_indexes: OriginFreshnessIndexes,
     storage_by_origin: BTreeMap<String, S3StorageRepository>,
 ) {
     for (origin_id, storage) in storage_by_origin {
         let syncer = syncer.clone();
-        let mirror = mirror.clone();
         let edge_configs = edge_configs.clone();
         let template_store = template_store.clone();
+        let freshness_indexes = freshness_indexes.clone();
         let interval_seconds = manifest
             .origins
             .get(&origin_id)
@@ -177,13 +253,13 @@ fn spawn_background_sync(
             let interval = Duration::from_secs(interval_seconds);
             loop {
                 tokio::time::sleep(interval).await;
-                if let Err(error) = sync_origin_and_refresh_edge_config(
+                if let Err(error) = refresh_origin_snapshot(
                     &origin_id,
                     &syncer,
                     &storage,
-                    &mirror,
                     &edge_configs,
                     &template_store,
+                    &freshness_indexes,
                 )
                 .await
                 {
@@ -454,6 +530,77 @@ missing:
         );
     }
 
+    #[tokio::test]
+    async fn failed_template_refresh_keeps_previous_mirror_and_templates() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let mirror = LocalMirrorRepository::new(&root);
+        let syncer = MirrorSyncService::new(&root);
+        let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
+        let template_store = TemplateStore::default();
+        let storage = StaticStorage::new(BTreeMap::from([(
+            "index.html".to_string(),
+            RemoteObject {
+                key: "index.html".to_string(),
+                body: Bytes::from_static(b"<h1>{{title}}</h1>"),
+                etag: Some("index-v1".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            },
+        )]));
+
+        sync_origin_and_refresh_edge_config(
+            "web",
+            &syncer,
+            &storage,
+            &mirror,
+            &edge_configs,
+            &template_store,
+        )
+        .await
+        .expect("initial sync succeeds");
+
+        let storage = StaticStorage::new(BTreeMap::from([(
+            "index.html".to_string(),
+            RemoteObject {
+                key: "index.html".to_string(),
+                body: Bytes::from_static(b"<h1>{{#if}}</h1>"),
+                etag: Some("index-v2".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            },
+        )]));
+
+        sync_origin_and_refresh_edge_config(
+            "web",
+            &syncer,
+            &storage,
+            &mirror,
+            &edge_configs,
+            &template_store,
+        )
+        .await
+        .expect_err("invalid template prevents activation");
+
+        assert_eq!(
+            mirror
+                .read_object("web", "/index.html")
+                .await
+                .expect("mirror read")
+                .expect("object exists")
+                .body,
+            Bytes::from_static(b"<h1>{{title}}</h1>")
+        );
+        assert_eq!(
+            template_store
+                .render("web", "/index.html", &serde_json::json!({"title":"Stable"}))
+                .expect("old template still renders"),
+            "<h1>Stable</h1>"
+        );
+    }
+
     async fn write_mirror_file(temp_root: &std::path::Path, key: &str, body: &str) {
         let path = temp_root.join("origins/web").join(key);
         tokio::fs::create_dir_all(path.parent().expect("parent"))
@@ -502,6 +649,7 @@ missing:
                 .values()
                 .map(|object| RemoteObjectSummary {
                     key: object.key.clone(),
+                    created_at: None,
                     etag: object.etag.clone(),
                     last_modified: object.last_modified.clone(),
                     size: object.body.len() as u64,
