@@ -50,6 +50,32 @@ Each origin syncs periodically. The interval comes from:
 
 Failed background syncs are logged and the previous local mirror, edge config, freshness index, and template registry remain active.
 
+## Manual Sync
+
+RenderMesh can refresh one origin immediately through the administrative API:
+
+```text
+POST /_rendermesh/origins/{origin_id}/sync
+```
+
+The endpoint is disabled unless `RENDERMESH_ADMIN_TOKEN` is configured. When enabled, requests must send:
+
+```text
+Authorization: Bearer <token>
+```
+
+Example:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $RENDERMESH_ADMIN_TOKEN" \
+  https://example.com/_rendermesh/origins/my_app/sync
+```
+
+Manual sync uses the same pipeline as startup and background sync. It stages the mirror, parses the staged edge config, compiles staged HTML templates, activates the next generation, and then submits CDN refresh when configured. If a required pre-activation step fails, the previous generation remains active.
+
+The response includes the activated generation, freshness counts, downloaded file count, and CDN submission details when a CDN refresh is submitted. A concurrent refresh for the same origin returns `409 Conflict`; different origins may refresh concurrently.
+
 ## Freshness Index
 
 RenderMesh keeps an in-memory freshness index per origin. The index records each known source path plus metadata such as size, ETag, last-modified value, content type, cache-control value, optional creation time, and the time RenderMesh captured the listing.
@@ -92,9 +118,12 @@ RenderMesh exposes the current in-memory snapshot for origin refresh state:
 GET /_rendermesh/origins
 GET /_rendermesh/origins/{origin_id}/snapshot
 GET /_rendermesh/origins/{origin_id}/freshness
+POST /_rendermesh/origins/{origin_id}/sync
 ```
 
-Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, last CDN provider/status/request id/submitted item count/error, and the last background refresh error when present.
+The `GET` endpoints are read-only. `POST /sync` is administrative and requires the bearer token described above.
+
+Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, last CDN provider/status/request id/submitted item count/error, and the last background or manual refresh error when present.
 
 ## Refresh Behavior
 

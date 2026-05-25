@@ -30,6 +30,7 @@ use rendermesh::{
         manifest::{parse_manifest_yaml, HostResolver},
         origin_runtime::{OriginRuntimeStore, OriginSnapshotDebug},
         render_gateway::RenderGatewayService,
+        startup::build_render_runtime,
     },
 };
 
@@ -45,12 +46,17 @@ async fn setup_router() -> Router {
         body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
         otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
+        admin_token: None,
     };
 
     create_router(state, &config)
 }
 
 fn setup_render_router(temp_root: &Path) -> Router {
+    setup_render_router_with_admin_token(temp_root, None)
+}
+
+fn setup_render_router_with_admin_token(temp_root: &Path, admin_token: Option<String>) -> Router {
     let gateway = test_render_gateway(&temp_root.join("origins"));
     let runtime = OriginRuntimeStore::default();
     runtime.set_snapshot(OriginSnapshotDebug {
@@ -88,6 +94,7 @@ fn setup_render_router(temp_root: &Path) -> Router {
         body_limit_bytes: 16,
         otel_enabled: false,
         rendermesh_manifest: "./rendermesh.yaml".to_string(),
+        admin_token,
     };
 
     create_router(state, &config)
@@ -131,6 +138,243 @@ async fn debug_origin_routes_expose_runtime_snapshot() {
     let body = response_json(response).await;
     assert_eq!(body["origin_id"], "web");
     assert_eq!(body["added_files"], 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_origin_sync_is_disabled_without_admin_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router(temp.path());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_rendermesh/origins/web/sync")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "manual_sync_disabled");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_origin_sync_requires_authorization_header() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router_with_admin_token(temp.path(), Some("secret".to_string()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_rendermesh/origins/web/sync")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "missing_authorization");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_origin_sync_rejects_invalid_admin_token() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let router = setup_render_router_with_admin_token(temp.path(), Some("secret".to_string()));
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_rendermesh/origins/web/sync")
+                .header("authorization", "Bearer wrong")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "invalid_token");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_origin_sync_refreshes_local_origin_without_restart() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_dir = temp.path().join("site");
+    let mirror_dir = temp.path().join("mirror");
+    tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+        .await
+        .expect("create source");
+    write_local_edge_config(&source_dir, "serve")
+        .await
+        .expect("write edge config");
+    tokio::fs::write(source_dir.join("index.html"), "version one")
+        .await
+        .expect("write index");
+    let manifest_path = temp.path().join("rendermesh.yaml");
+    tokio::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 3600
+origins:
+  web:
+    type: local
+    path: ./site
+hosts:
+  app.test:
+    origin: web
+"#,
+            mirror_dir.display()
+        ),
+    )
+    .await
+    .expect("write manifest");
+
+    let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+        .await
+        .expect("runtime builds");
+    let state = AppState::new_with_refresh(
+        runtime.render_gateway,
+        runtime.origin_runtime,
+        runtime.origin_refresh,
+    );
+    let router = create_router(
+        state,
+        &AppConfig {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 0,
+            cors: CorsConfig::Permissive,
+            body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
+            otel_enabled: false,
+            rendermesh_manifest: manifest_path.to_string_lossy().to_string(),
+            admin_token: Some("secret".to_string()),
+        },
+    );
+
+    tokio::fs::write(source_dir.join("index.html"), "version two")
+        .await
+        .expect("update index");
+
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_rendermesh/origins/web/sync")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(body["origin_id"], "web");
+    assert_eq!(body["generation"], 2);
+    assert_eq!(body["modified_files"], 1);
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/")
+                .header("host", "app.test")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_bytes(response).await;
+    assert_eq!(body, bytes::Bytes::from_static(b"version two"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_origin_sync_returns_not_found_for_unknown_origin() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_dir = temp.path().join("site");
+    let mirror_dir = temp.path().join("mirror");
+    tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+        .await
+        .expect("create source");
+    write_local_edge_config(&source_dir, "serve")
+        .await
+        .expect("write edge config");
+    tokio::fs::write(source_dir.join("index.html"), "hello")
+        .await
+        .expect("write index");
+    let manifest_path = temp.path().join("rendermesh.yaml");
+    tokio::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 3600
+origins:
+  web:
+    type: local
+    path: ./site
+hosts:
+  app.test:
+    origin: web
+"#,
+            mirror_dir.display()
+        ),
+    )
+    .await
+    .expect("write manifest");
+
+    let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+        .await
+        .expect("runtime builds");
+    let state = AppState::new_with_refresh(
+        runtime.render_gateway,
+        runtime.origin_runtime,
+        runtime.origin_refresh,
+    );
+    let router = create_router(
+        state,
+        &AppConfig {
+            host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port: 0,
+            cors: CorsConfig::Permissive,
+            body_limit_bytes: DEFAULT_BODY_LIMIT_BYTES,
+            otel_enabled: false,
+            rendermesh_manifest: manifest_path.to_string_lossy().to_string(),
+            admin_token: Some("secret".to_string()),
+        },
+    );
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/_rendermesh/origins/missing/sync")
+                .header("authorization", "Bearer secret")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("request failed");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], "origin_not_found");
 }
 
 fn test_render_gateway(mirror_root: &Path) -> RenderGatewayService {
@@ -203,6 +447,28 @@ async fn response_bytes(response: Response) -> bytes::Bytes {
         .await
         .expect("failed to read response body")
         .to_bytes()
+}
+
+async fn write_local_edge_config(source_dir: &Path, missing_action: &str) -> std::io::Result<()> {
+    let (field_name, field_value) = match missing_action {
+        "serve" => ("path", "/index.html"),
+        _ => ("page", "/index.html"),
+    };
+    tokio::fs::write(
+        source_dir.join("_rendermesh/edge.yaml"),
+        format!(
+            r#"
+version: 1
+edge:
+  root_object: /index.html
+  auto_rewrite_index: true
+missing:
+  action: {missing_action}
+  {field_name}: {field_value}
+"#
+        ),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

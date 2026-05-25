@@ -19,6 +19,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
+- Authorized operators can force an immediate per-origin sync without restarting the service.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
 ## Project Status
@@ -157,6 +158,24 @@ missing:
 ```
 
 If this file is missing, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+
+## Manual Origin Sync
+
+Set `RENDERMESH_ADMIN_TOKEN` to enable the administrative manual sync endpoint:
+
+```bash
+export RENDERMESH_ADMIN_TOKEN=change-me
+```
+
+Force one origin to refresh immediately:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $RENDERMESH_ADMIN_TOKEN" \
+  http://127.0.0.1:3000/_rendermesh/origins/my_app/sync
+```
+
+Manual sync runs the same atomic activation pipeline as startup and background sync. If listing, edge config parsing, or HTML template compilation fails, RenderMesh keeps the previous generation active. If `RENDERMESH_ADMIN_TOKEN` is not set, the endpoint returns `403`.
 
 ## Edge Hook Contract
 

@@ -64,6 +64,7 @@ RenderMesh emits structured spans across the full fallback path:
 - `rendermesh.template_render`: Handlebars render duration.
 - `rendermesh.missing`: Missing-file behavior.
 - `rendermesh.response_build`: Final response assembly.
+- `rendermesh.origin_sync`: Startup, background, and manual origin refresh activation.
 
 ## Edge HTTP Events
 
@@ -75,4 +76,8 @@ External edge calls also emit events:
 - `edge_http_response_received`
 - `edge_http_payload_decoded`
 
-Important fields include `duration_ms`, `status`, `origin_id`, `bucket`, `path`, `edge_url`, `timeout_ms`, `outcome`, `hit`, `rendered`, and `body_bytes`.
+Important fields include `duration_ms`, `status`, `origin_id`, `bucket`, `path`, `edge_url`, `timeout_ms`, `outcome`, `hit`, `rendered`, `body_bytes`, `trigger`, `generation`, `added_files`, `modified_files`, `removed_files`, and `downloaded_files`.
+
+## Manual Sync Events
+
+Manual sync requests emit the same `rendermesh.origin_sync` span as startup and background refresh, with `trigger=Manual`. Logs include sync start, generation activation, CDN refresh submission, and failures that keep the previous generation active.

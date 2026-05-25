@@ -12,7 +12,11 @@ async fn main() -> Result<()> {
     let _telemetry = telemetry::init_tracing(config.otel_enabled)?;
 
     let runtime = build_render_runtime(&config.rendermesh_manifest).await?;
-    let state = AppState::new_with_runtime(runtime.render_gateway, runtime.origin_runtime);
+    let state = AppState::new_with_refresh(
+        runtime.render_gateway,
+        runtime.origin_runtime,
+        runtime.origin_refresh,
+    );
 
     let router = create_router(state, &config);
 
