@@ -13,8 +13,9 @@ At startup, RenderMesh:
 5. Loads each staged origin's edge config from `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
 6. Compiles staged HTML templates into the in-memory template store.
 7. Activates the staged mirror and runtime state after validation succeeds.
-8. Starts background sync tasks.
-9. Starts serving traffic.
+8. Submits CDN refresh when the origin has `cdn` configured and the freshness diff has changes.
+9. Starts background sync tasks.
+10. Starts serving traffic.
 
 Startup fails if any initial origin refresh, edge config parse, or template compilation fails.
 
@@ -69,6 +70,17 @@ Refresh writes into a staging directory first. RenderMesh parses edge config and
 
 Each successful activation increments the origin generation exposed by the runtime debug API.
 
+## CDN Refresh
+
+CDN refresh runs only after successful activation. It uses the freshness diff for the activated generation:
+
+- `changed_paths`: purge added, modified, and removed paths.
+- `all`: purge the full configured CDN cache scope when any path changed.
+
+CloudFront receives invalidation paths such as `/index.html` or `/*`. Cloudflare receives full URLs, built from `url_prefixes` or exact host mappings.
+
+CDN purge failures do not roll back the activated generation. RenderMesh records the error in the runtime snapshot and keeps serving the activated local mirror.
+
 ## Runtime Debug API
 
 RenderMesh exposes the current in-memory snapshot for origin refresh state:
@@ -79,7 +91,7 @@ GET /_rendermesh/origins/{origin_id}/snapshot
 GET /_rendermesh/origins/{origin_id}/freshness
 ```
 
-Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, and the last background refresh error when present.
+Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, last CDN provider/status/request id/submitted item count/error, and the last background refresh error when present.
 
 ## Refresh Behavior
 

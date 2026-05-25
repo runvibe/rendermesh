@@ -40,6 +40,7 @@ The MVP includes:
 - Exact and wildcard host resolution.
 - Local origin mirroring.
 - Periodic background sync.
+- CloudFront and Cloudflare refresh after origin generation activation.
 - Per-origin edge config via `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
 - Redirects, rewrites, root object, auto-index, and missing-file behavior.
 - Global per-origin edge hooks.

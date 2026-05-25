@@ -14,6 +14,7 @@ use crate::{
         origin_storage::OriginStorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
     },
     services::{
+        cdn_refresh::OriginCdnRefresh,
         cors::CorsPolicy,
         edge_config::{default_edge_config, parse_edge_config},
         edge_config_store::EdgeConfigStore,
@@ -54,14 +55,17 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
     let template_store = TemplateStore::default();
     let freshness_indexes = OriginFreshnessIndexes::default();
     let origin_runtime = OriginRuntimeStore::default();
+    let cdn_by_origin = build_origin_cdns(&manifest).await?;
 
     let mut storage_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
         let storage = OriginStorageRepository::from_origin_config(origin, manifest_dir).await?;
+        let cdn_refresh = cdn_by_origin.get(origin_id);
         let report = refresh_origin_snapshot(
             origin_id,
             &syncer,
             &storage,
+            cdn_refresh,
             &edge_configs,
             &template_store,
             &freshness_indexes,
@@ -84,6 +88,7 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         freshness_indexes,
         origin_runtime.clone(),
         storage_by_origin,
+        cdn_by_origin,
     );
 
     let render_gateway = RenderGatewayService::new_with_stores_and_origin_buckets(
@@ -109,6 +114,34 @@ fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
         .collect()
 }
 
+async fn build_origin_cdns(
+    manifest: &RenderMeshManifest,
+) -> Result<BTreeMap<String, OriginCdnRefresh>> {
+    let mut output = BTreeMap::new();
+
+    for (origin_id, origin) in &manifest.origins {
+        let Some(config) = origin.cdn() else {
+            continue;
+        };
+        let url_prefixes = exact_url_prefixes_for_origin(manifest, origin_id);
+        output.insert(
+            origin_id.clone(),
+            OriginCdnRefresh::from_config(config, url_prefixes).await?,
+        );
+    }
+
+    Ok(output)
+}
+
+fn exact_url_prefixes_for_origin(manifest: &RenderMeshManifest, origin_id: &str) -> Vec<String> {
+    manifest
+        .hosts
+        .iter()
+        .filter(|(host, config)| config.origin == origin_id && !host.starts_with("*."))
+        .map(|(host, _)| format!("https://{host}"))
+        .collect()
+}
+
 #[cfg(test)]
 pub(crate) async fn load_edge_configs<I>(
     origin_ids: I,
@@ -129,6 +162,7 @@ pub(crate) async fn sync_origin_and_refresh_edge_config<S>(
     origin_id: &str,
     syncer: &MirrorSyncService,
     storage: &S,
+    cdn_refresh: Option<&OriginCdnRefresh>,
     _mirror: &LocalMirrorRepository,
     edge_configs: &EdgeConfigStore,
     template_store: &TemplateStore,
@@ -142,6 +176,7 @@ where
         origin_id,
         syncer,
         storage,
+        cdn_refresh,
         edge_configs,
         template_store,
         &freshness_indexes,
@@ -160,6 +195,7 @@ pub(crate) async fn refresh_origin_snapshot<S>(
     origin_id: &str,
     syncer: &MirrorSyncService,
     storage: &S,
+    cdn_refresh: Option<&OriginCdnRefresh>,
     edge_configs: &EdgeConfigStore,
     template_store: &TemplateStore,
     freshness_indexes: &OriginFreshnessIndexes,
@@ -187,6 +223,7 @@ where
         )
         .await?;
     let next_index = staged.index.clone();
+    let diff = staged.diff.clone();
     let report = staged.report.clone();
     let next_generation = origin_runtime
         .get(origin_id)
@@ -205,6 +242,12 @@ where
         unchanged_files: staged.diff.unchanged.len(),
         downloaded_files: report.downloaded,
         last_error: None,
+        last_cdn_provider: None,
+        last_cdn_status: None,
+        last_cdn_request_id: None,
+        last_cdn_refreshed_at: None,
+        last_cdn_submitted_items: None,
+        last_cdn_error: None,
     };
     tracing::info!(
         origin = %origin_id,
@@ -226,6 +269,46 @@ where
         .expect("freshness index lock")
         .insert(origin_id.to_string(), next_index);
     origin_runtime.set_snapshot(snapshot);
+    if let Some(cdn_refresh) = cdn_refresh {
+        match cdn_refresh
+            .refresh_after_activation(origin_id, next_generation, &diff)
+            .await
+        {
+            Ok(Some(outcome)) => {
+                tracing::info!(
+                    origin = %origin_id,
+                    generation = next_generation,
+                    provider = %outcome.provider,
+                    status = %outcome.status,
+                    submitted_items = outcome.submitted_items,
+                    changed_count = outcome.changed_count,
+                    "cdn refresh submitted"
+                );
+                origin_runtime.set_cdn_result(
+                    origin_id,
+                    outcome.provider,
+                    outcome.status,
+                    outcome.request_id,
+                    outcome.submitted_items,
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    origin = %origin_id,
+                    generation = next_generation,
+                    "cdn refresh skipped because origin has no changes"
+                );
+            }
+            Err(error) => {
+                origin_runtime.set_cdn_error(origin_id, error.to_string());
+                tracing::error!(
+                    origin = %origin_id,
+                    generation = next_generation,
+                    "cdn refresh failed after origin activation: {error}"
+                );
+            }
+        }
+    }
     tracing::info!(origin = %origin_id, generation = next_generation, "origin freshness refresh activated");
 
     Ok(report)
@@ -283,8 +366,10 @@ fn spawn_background_sync(
     freshness_indexes: OriginFreshnessIndexes,
     origin_runtime: OriginRuntimeStore,
     storage_by_origin: BTreeMap<String, OriginStorageRepository>,
+    cdn_by_origin: BTreeMap<String, OriginCdnRefresh>,
 ) {
     for (origin_id, storage) in storage_by_origin {
+        let cdn_refresh = cdn_by_origin.get(&origin_id).cloned();
         let syncer = syncer.clone();
         let edge_configs = edge_configs.clone();
         let template_store = template_store.clone();
@@ -304,6 +389,7 @@ fn spawn_background_sync(
                     &origin_id,
                     &syncer,
                     &storage,
+                    cdn_refresh.as_ref(),
                     &edge_configs,
                     &template_store,
                     &freshness_indexes,
@@ -326,6 +412,11 @@ mod tests {
     use anyhow::Result;
     use async_trait::async_trait;
     use bytes::Bytes;
+    use serde_json::json;
+    use wiremock::{
+        matchers::{header, method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
 
     use super::*;
     use crate::{
@@ -383,6 +474,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &mirror,
             &store,
             &template_store,
@@ -428,6 +520,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &mirror,
             &store,
             &template_store,
@@ -564,6 +657,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &mirror,
             &edge_configs,
             &template_store,
@@ -603,6 +697,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &mirror,
             &edge_configs,
             &template_store,
@@ -626,6 +721,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &mirror,
             &edge_configs,
             &template_store,
@@ -675,6 +771,7 @@ missing:
             "web",
             &syncer,
             &storage,
+            None,
             &edge_configs,
             &template_store,
             &freshness_indexes,
@@ -755,6 +852,102 @@ hosts:
                 .expect("mirror index exists"),
             "<h1>{{title}}</h1>"
         );
+    }
+
+    #[tokio::test]
+    async fn build_render_runtime_submits_cloudflare_purge_after_local_origin_activation() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/zones/zone-123/purge_cache"))
+            .and(header("authorization", "Bearer token-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "id": "purge-123" }
+            })))
+            .mount(&server)
+            .await;
+        let _zone = EnvVarGuard::set("TEST_CF_ZONE_ID", "zone-123");
+        let _token = EnvVarGuard::set("TEST_CF_API_TOKEN", "token-123");
+        let _api_base = EnvVarGuard::set("TEST_CF_API_BASE", &server.uri());
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let source_dir = config_dir.join("site");
+        let mirror_dir = temp.path().join("var/origins");
+        tokio::fs::create_dir_all(&source_dir)
+            .await
+            .expect("create source dir");
+        tokio::fs::write(source_dir.join("index.html"), "<h1>Hello</h1>")
+            .await
+            .expect("write index");
+
+        let manifest_path = config_dir.join("rendermesh.yaml");
+        tokio::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: local
+    path: ./site
+    cdn:
+      provider: cloudflare
+      zone_id_env: TEST_CF_ZONE_ID
+      api_token_env: TEST_CF_API_TOKEN
+      api_base_env: TEST_CF_API_BASE
+      strategy: changed_paths
+hosts:
+  web.test:
+    origin: web
+"#,
+                mirror_dir.display()
+            ),
+        )
+        .await
+        .expect("write manifest");
+
+        let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+            .await
+            .expect("runtime builds");
+
+        let snapshot = runtime.origin_runtime.get("web").expect("origin snapshot");
+        assert_eq!(snapshot.last_cdn_provider.as_deref(), Some("cloudflare"));
+        assert_eq!(snapshot.last_cdn_status.as_deref(), Some("submitted"));
+        assert_eq!(snapshot.last_cdn_request_id.as_deref(), Some("purge-123"));
+        assert_eq!(snapshot.last_cdn_submitted_items, Some(1));
+
+        let requests = server.received_requests().await.expect("requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&requests[0].body).expect("json body"),
+            json!({ "files": ["https://web.test/index.html"] })
+        );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.original.as_ref() {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 
     async fn write_mirror_file(temp_root: &std::path::Path, key: &str, body: &str) {

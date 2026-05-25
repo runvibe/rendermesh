@@ -16,6 +16,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
 - Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
+- CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
@@ -29,7 +30,8 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Configuration](docs/configuration.md): global manifest, environment variables, S3 origins, local origins, hosts, and credentials.
 - [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
-- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, and refresh behavior.
+- [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
+- [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
 - [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.
@@ -101,6 +103,10 @@ origins:
     region_env: MY_APP_STORAGE_REGION
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
+    cdn:
+      provider: cloudfront
+      distribution_id_env: MY_APP_CLOUDFRONT_DISTRIBUTION_ID
+      strategy: changed_paths
 
 hosts:
   myapp.com:

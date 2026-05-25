@@ -120,6 +120,7 @@ mod tests {
             secret_access_key_env: Some("TEST_S3_SECRET_ACCESS_KEY".to_string()),
             force_path_style_env: Some("TEST_S3_FORCE_PATH_STYLE".to_string()),
             sync_interval_seconds: None,
+            cdn: None,
         };
 
         let _repository = S3StorageRepository::from_origin_config(&origin)
@@ -140,6 +141,7 @@ mod tests {
             secret_access_key_env: None,
             force_path_style_env: None,
             sync_interval_seconds: None,
+            cdn: None,
         };
 
         let _repository = S3StorageRepository::from_origin_config(&origin)

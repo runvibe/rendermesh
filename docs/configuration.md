@@ -24,6 +24,8 @@ S3 origins reference storage connection settings by environment variable name:
 - Optional access key id: for example `MY_APP_ACCESS_KEY_ID`.
 - Optional secret access key: for example `MY_APP_SECRET_ACCESS_KEY`.
 - Optional force path style flag: for example `MY_APP_FORCE_PATH_STYLE`.
+- Optional CloudFront distribution id: for example `MY_APP_CLOUDFRONT_DISTRIBUTION_ID`.
+- Optional Cloudflare zone id and API token: for example `MY_APP_CLOUDFLARE_ZONE_ID` and `MY_APP_CLOUDFLARE_API_TOKEN`.
 
 Truth values for `force_path_style` are `1`, `true`, `yes`, and `on`. False values are `0`, `false`, `no`, and `off`.
 
@@ -48,6 +50,10 @@ origins:
     region_env: MY_APP_STORAGE_REGION
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
+    cdn:
+      provider: cloudfront
+      distribution_id_env: MY_APP_CLOUDFRONT_DISTRIBUTION_ID
+      strategy: changed_paths
 
 hosts:
   myapp.com:
@@ -117,6 +123,53 @@ origins:
 Absolute local paths are used as configured. Relative local paths are resolved from the directory containing the global manifest file. The path must exist and be a directory during startup.
 
 Local origins do not accept S3 fields such as `bucket`, `endpoint_env`, `region_env`, `access_key_id_env`, `secret_access_key_env`, or `force_path_style_env`.
+
+## `cdn`
+
+Each origin can optionally configure CDN refresh. CDN refresh runs after a new origin generation is activated.
+
+CloudFront:
+
+```yaml
+origins:
+  my_app:
+    type: s3
+    bucket: bucket_my_app_123
+    endpoint_env: MY_APP_STORAGE_ENDPOINT
+    region_env: MY_APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront
+      distribution_id_env: MY_APP_CLOUDFRONT_DISTRIBUTION_ID
+      strategy: changed_paths
+```
+
+Cloudflare:
+
+```yaml
+origins:
+  docs:
+    type: local
+    path: ./docs
+    cdn:
+      provider: cloudflare
+      zone_id_env: DOCS_CLOUDFLARE_ZONE_ID
+      api_token_env: DOCS_CLOUDFLARE_API_TOKEN
+      strategy: changed_paths
+      url_prefixes:
+        - https://docs.example.com
+```
+
+Fields:
+
+- `provider`: `cloudfront` or `cloudflare`.
+- `strategy`: `changed_paths` or `all`. Defaults to `changed_paths`.
+- `distribution_id_env`: CloudFront distribution id env var.
+- `zone_id_env`: Cloudflare zone id env var.
+- `api_token_env`: Cloudflare API token env var.
+- `url_prefixes`: Optional Cloudflare URL prefixes. When omitted, RenderMesh derives `https://<host>` from exact host mappings for the origin.
+- `api_base_env`: Optional Cloudflare API base env var for tests or compatible proxies.
+
+`changed_paths` invalidates added, modified, and removed paths from the freshness diff. `all` purges the whole configured CDN cache scope when a refresh has any changes.
 
 ## `hosts`
 

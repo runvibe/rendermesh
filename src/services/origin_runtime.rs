@@ -23,6 +23,12 @@ pub struct OriginSnapshotDebug {
     pub unchanged_files: usize,
     pub downloaded_files: usize,
     pub last_error: Option<String>,
+    pub last_cdn_provider: Option<String>,
+    pub last_cdn_status: Option<String>,
+    pub last_cdn_request_id: Option<String>,
+    pub last_cdn_refreshed_at: Option<String>,
+    pub last_cdn_submitted_items: Option<usize>,
+    pub last_cdn_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -32,10 +38,20 @@ pub struct OriginListDebug {
 
 impl OriginRuntimeStore {
     pub fn set_snapshot(&self, snapshot: OriginSnapshotDebug) {
-        self.snapshots
-            .write()
-            .expect("origin runtime lock")
-            .insert(snapshot.origin_id.clone(), snapshot);
+        let mut snapshots = self.snapshots.write().expect("origin runtime lock");
+        let snapshot = match snapshots.get(&snapshot.origin_id) {
+            Some(previous) => OriginSnapshotDebug {
+                last_cdn_provider: previous.last_cdn_provider.clone(),
+                last_cdn_status: previous.last_cdn_status.clone(),
+                last_cdn_request_id: previous.last_cdn_request_id.clone(),
+                last_cdn_refreshed_at: previous.last_cdn_refreshed_at.clone(),
+                last_cdn_submitted_items: previous.last_cdn_submitted_items,
+                last_cdn_error: previous.last_cdn_error.clone(),
+                ..snapshot
+            },
+            None => snapshot,
+        };
+        snapshots.insert(snapshot.origin_id.clone(), snapshot);
     }
 
     pub fn set_error(&self, origin_id: impl Into<String>, error: impl Into<String>) {
@@ -59,9 +75,49 @@ impl OriginRuntimeStore {
                         unchanged_files: 0,
                         downloaded_files: 0,
                         last_error: Some(error),
+                        last_cdn_provider: None,
+                        last_cdn_status: None,
+                        last_cdn_request_id: None,
+                        last_cdn_refreshed_at: None,
+                        last_cdn_submitted_items: None,
+                        last_cdn_error: None,
                     },
                 );
             }
+        }
+    }
+
+    pub fn set_cdn_result(
+        &self,
+        origin_id: &str,
+        provider: impl Into<String>,
+        status: impl Into<String>,
+        request_id: Option<String>,
+        submitted_items: usize,
+    ) {
+        if let Some(snapshot) = self
+            .snapshots
+            .write()
+            .expect("origin runtime lock")
+            .get_mut(origin_id)
+        {
+            snapshot.last_cdn_provider = Some(provider.into());
+            snapshot.last_cdn_status = Some(status.into());
+            snapshot.last_cdn_request_id = request_id;
+            snapshot.last_cdn_refreshed_at = Some(chrono::Utc::now().to_rfc3339());
+            snapshot.last_cdn_submitted_items = Some(submitted_items);
+            snapshot.last_cdn_error = None;
+        }
+    }
+
+    pub fn set_cdn_error(&self, origin_id: &str, error: impl Into<String>) {
+        if let Some(snapshot) = self
+            .snapshots
+            .write()
+            .expect("origin runtime lock")
+            .get_mut(origin_id)
+        {
+            snapshot.last_cdn_error = Some(error.into());
         }
     }
 

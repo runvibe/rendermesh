@@ -65,6 +65,12 @@ fn setup_render_router(temp_root: &Path) -> Router {
         unchanged_files: 1,
         downloaded_files: 1,
         last_error: None,
+        last_cdn_provider: None,
+        last_cdn_status: None,
+        last_cdn_request_id: None,
+        last_cdn_refreshed_at: None,
+        last_cdn_submitted_items: None,
+        last_cdn_error: None,
     });
     let state = AppState::new_with_runtime(gateway, runtime);
     let config = AppConfig {

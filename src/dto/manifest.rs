@@ -37,6 +37,13 @@ impl OriginConfig {
             Self::Local(_) => origin_id.to_string(),
         }
     }
+
+    pub fn cdn(&self) -> Option<&CdnConfig> {
+        match self {
+            Self::S3(origin) => origin.cdn.as_ref(),
+            Self::Local(origin) => origin.cdn.as_ref(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -49,6 +56,7 @@ pub struct S3OriginConfig {
     pub secret_access_key_env: Option<String>,
     pub force_path_style_env: Option<String>,
     pub sync_interval_seconds: Option<u64>,
+    pub cdn: Option<CdnConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -56,9 +64,46 @@ pub struct S3OriginConfig {
 pub struct LocalOriginConfig {
     pub path: String,
     pub sync_interval_seconds: Option<u64>,
+    pub cdn: Option<CdnConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct HostConfig {
     pub origin: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "provider", rename_all = "snake_case")]
+pub enum CdnConfig {
+    #[serde(rename = "cloudfront")]
+    CloudFront(CloudFrontCdnConfig),
+    Cloudflare(CloudflareCdnConfig),
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudFrontCdnConfig {
+    pub distribution_id_env: String,
+    #[serde(default)]
+    pub strategy: CdnRefreshStrategy,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudflareCdnConfig {
+    pub zone_id_env: String,
+    pub api_token_env: String,
+    pub api_base_env: Option<String>,
+    #[serde(default)]
+    pub strategy: CdnRefreshStrategy,
+    #[serde(default)]
+    pub url_prefixes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CdnRefreshStrategy {
+    #[default]
+    ChangedPaths,
+    All,
 }

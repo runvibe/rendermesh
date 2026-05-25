@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use anyhow::{anyhow, Result};
 
 use crate::{
-    dto::manifest::{OriginConfig, RenderMeshManifest},
+    dto::manifest::{CdnConfig, OriginConfig, RenderMeshManifest},
     repositories::manifest::ManifestRepository,
     services::config_format::parse_config,
 };
@@ -161,11 +161,13 @@ pub fn validate_manifest(manifest: &RenderMeshManifest) -> Result<()> {
                 if origin.bucket.trim().is_empty() {
                     return Err(anyhow!("origin {origin_id} bucket is required"));
                 }
+                validate_cdn_config(origin_id, origin.cdn.as_ref())?;
             }
             OriginConfig::Local(origin) => {
                 if origin.path.trim().is_empty() {
                     return Err(anyhow!("origin {origin_id} path is required"));
                 }
+                validate_cdn_config(origin_id, origin.cdn.as_ref())?;
             }
         }
         if origin.sync_interval_seconds() == Some(0) {
@@ -185,6 +187,36 @@ pub fn validate_manifest(manifest: &RenderMeshManifest) -> Result<()> {
                 host_config.origin
             ));
         }
+    }
+
+    Ok(())
+}
+
+fn validate_cdn_config(origin_id: &str, cdn: Option<&CdnConfig>) -> Result<()> {
+    match cdn {
+        Some(CdnConfig::CloudFront(config)) => {
+            if config.distribution_id_env.trim().is_empty() {
+                return Err(anyhow!(
+                    "origin {origin_id} cdn.distribution_id_env is required"
+                ));
+            }
+        }
+        Some(CdnConfig::Cloudflare(config)) => {
+            if config.zone_id_env.trim().is_empty() {
+                return Err(anyhow!("origin {origin_id} cdn.zone_id_env is required"));
+            }
+            if config.api_token_env.trim().is_empty() {
+                return Err(anyhow!("origin {origin_id} cdn.api_token_env is required"));
+            }
+            for url_prefix in &config.url_prefixes {
+                if !url_prefix.starts_with("https://") && !url_prefix.starts_with("http://") {
+                    return Err(anyhow!(
+                        "origin {origin_id} cdn.url_prefixes must use http or https URLs"
+                    ));
+                }
+            }
+        }
+        None => {}
     }
 
     Ok(())
@@ -349,6 +381,86 @@ hosts:
             crate::dto::manifest::OriginConfig::Local(origin) => {
                 assert_eq!(origin.path, "./examples/local/bucket");
                 assert_eq!(origin.sync_interval_seconds, Some(5));
+            }
+            other => panic!("expected local origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cloudfront_cdn_config() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: s3
+    bucket: web-bucket
+    endpoint_env: WEB_ENDPOINT
+    region_env: WEB_REGION
+    cdn:
+      provider: cloudfront
+      distribution_id_env: WEB_DISTRIBUTION_ID
+      strategy: changed_paths
+hosts:
+  web.test:
+    origin: web
+"#,
+        )
+        .expect("manifest parses");
+
+        match &manifest.origins["web"] {
+            OriginConfig::S3(origin) => {
+                assert!(matches!(
+                    origin.cdn,
+                    Some(crate::dto::manifest::CdnConfig::CloudFront(_))
+                ));
+            }
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cloudflare_cdn_config_from_json() {
+        let manifest = parse_manifest_config(
+            r#"
+{
+  "version": 1,
+  "runtime": {
+    "local_store_dir": "./var/rendermesh/origins",
+    "sync_interval_seconds": 60
+  },
+  "origins": {
+    "docs": {
+      "type": "local",
+      "path": "./docs",
+      "cdn": {
+        "provider": "cloudflare",
+        "zone_id_env": "DOCS_ZONE_ID",
+        "api_token_env": "DOCS_API_TOKEN",
+        "strategy": "changed_paths",
+        "url_prefixes": ["https://docs.test"]
+      }
+    }
+  },
+  "hosts": {
+    "docs.test": {
+      "origin": "docs"
+    }
+  }
+}
+"#,
+        )
+        .expect("manifest parses");
+
+        match &manifest.origins["docs"] {
+            OriginConfig::Local(origin) => {
+                assert!(matches!(
+                    origin.cdn,
+                    Some(crate::dto::manifest::CdnConfig::Cloudflare(_))
+                ));
             }
             other => panic!("expected local origin, got {other:?}"),
         }
