@@ -29,6 +29,14 @@ pub struct OriginSnapshotDebug {
     pub last_cdn_refreshed_at: Option<String>,
     pub last_cdn_submitted_items: Option<usize>,
     pub last_cdn_error: Option<String>,
+    pub last_cdn_domain_provider: Option<String>,
+    pub last_cdn_domain_status: Option<String>,
+    pub last_cdn_domain_reconciled_at: Option<String>,
+    pub last_cdn_domain_added: Option<usize>,
+    pub last_cdn_domain_updated: Option<usize>,
+    pub last_cdn_domain_removed: Option<usize>,
+    pub last_cdn_domain_unchanged: Option<usize>,
+    pub last_cdn_domain_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -47,6 +55,14 @@ impl OriginRuntimeStore {
                 last_cdn_refreshed_at: previous.last_cdn_refreshed_at.clone(),
                 last_cdn_submitted_items: previous.last_cdn_submitted_items,
                 last_cdn_error: previous.last_cdn_error.clone(),
+                last_cdn_domain_provider: previous.last_cdn_domain_provider.clone(),
+                last_cdn_domain_status: previous.last_cdn_domain_status.clone(),
+                last_cdn_domain_reconciled_at: previous.last_cdn_domain_reconciled_at.clone(),
+                last_cdn_domain_added: previous.last_cdn_domain_added,
+                last_cdn_domain_updated: previous.last_cdn_domain_updated,
+                last_cdn_domain_removed: previous.last_cdn_domain_removed,
+                last_cdn_domain_unchanged: previous.last_cdn_domain_unchanged,
+                last_cdn_domain_error: previous.last_cdn_domain_error.clone(),
                 ..snapshot
             },
             None => snapshot,
@@ -81,6 +97,14 @@ impl OriginRuntimeStore {
                         last_cdn_refreshed_at: None,
                         last_cdn_submitted_items: None,
                         last_cdn_error: None,
+                        last_cdn_domain_provider: None,
+                        last_cdn_domain_status: None,
+                        last_cdn_domain_reconciled_at: None,
+                        last_cdn_domain_added: None,
+                        last_cdn_domain_updated: None,
+                        last_cdn_domain_removed: None,
+                        last_cdn_domain_unchanged: None,
+                        last_cdn_domain_error: None,
                     },
                 );
             }
@@ -118,6 +142,44 @@ impl OriginRuntimeStore {
             .get_mut(origin_id)
         {
             snapshot.last_cdn_error = Some(error.into());
+        }
+    }
+
+    pub fn set_cdn_domain_result(
+        &self,
+        origin_id: &str,
+        provider: impl Into<String>,
+        status: impl Into<String>,
+        added: usize,
+        updated: usize,
+        removed: usize,
+        unchanged: usize,
+    ) {
+        if let Some(snapshot) = self
+            .snapshots
+            .write()
+            .expect("origin runtime lock")
+            .get_mut(origin_id)
+        {
+            snapshot.last_cdn_domain_provider = Some(provider.into());
+            snapshot.last_cdn_domain_status = Some(status.into());
+            snapshot.last_cdn_domain_reconciled_at = Some(chrono::Utc::now().to_rfc3339());
+            snapshot.last_cdn_domain_added = Some(added);
+            snapshot.last_cdn_domain_updated = Some(updated);
+            snapshot.last_cdn_domain_removed = Some(removed);
+            snapshot.last_cdn_domain_unchanged = Some(unchanged);
+            snapshot.last_cdn_domain_error = None;
+        }
+    }
+
+    pub fn set_cdn_domain_error(&self, origin_id: &str, error: impl Into<String>) {
+        if let Some(snapshot) = self
+            .snapshots
+            .write()
+            .expect("origin runtime lock")
+            .get_mut(origin_id)
+        {
+            snapshot.last_cdn_domain_error = Some(error.into());
         }
     }
 

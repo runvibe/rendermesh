@@ -171,6 +171,52 @@ Fields:
 
 `changed_paths` invalidates added, modified, and removed paths from the freshness diff. `all` purges the whole configured CDN cache scope when a refresh has any changes.
 
+### `cdn.domains`
+
+`cdn.domains` reconciles CDN-facing domains from the global `hosts` map during startup.
+
+CloudFront:
+
+```yaml
+cdn:
+  provider: cloudfront
+  distribution_id_env: WEB_CLOUDFRONT_DISTRIBUTION_ID
+  domains:
+    enabled: true
+    origin_domain_env: RENDERMESH_PUBLIC_ORIGIN
+    certificate_arn_env: WEB_CLOUDFRONT_CERTIFICATE_ARN
+    include_wildcards: false
+    remove_extra_domains: false
+```
+
+Cloudflare DNS records:
+
+```yaml
+cdn:
+  provider: cloudflare
+  zone_id_env: WEB_CLOUDFLARE_ZONE_ID
+  api_token_env: WEB_CLOUDFLARE_API_TOKEN
+  domains:
+    enabled: true
+    mode: dns_records
+    origin_domain_env: RENDERMESH_PUBLIC_ORIGIN
+    proxied: true
+    include_wildcards: false
+    remove_extra_domains: false
+```
+
+Domain fields:
+
+- `enabled`: Enables domain reconciliation.
+- `mode`: Cloudflare mode. `dns_records` is implemented. `custom_hostnames` is reserved for a future Cloudflare for SaaS implementation.
+- `origin_domain_env`: Env var containing the upstream DNS name that CDN domains should point to, such as the public RenderMesh load balancer hostname.
+- `certificate_arn_env`: CloudFront ACM certificate ARN env var. Required for CloudFront domain reconciliation.
+- `proxied`: Cloudflare DNS proxied flag. Defaults to `true`.
+- `include_wildcards`: Include wildcard hosts such as `*.example.com`. Defaults to `false`.
+- `remove_extra_domains`: Remove provider domains that point to this origin but are no longer in RenderMesh `hosts`. Defaults to `false`.
+
+RenderMesh reconciles exact hosts by default. Wildcard hosts are included only when `include_wildcards` is true.
+
 ## `hosts`
 
 Hosts map incoming domains to origin ids.

@@ -14,8 +14,9 @@ At startup, RenderMesh:
 6. Compiles staged HTML templates into the in-memory template store.
 7. Activates the staged mirror and runtime state after validation succeeds.
 8. Submits CDN refresh when the origin has `cdn` configured and the freshness diff has changes.
-9. Starts background sync tasks.
-10. Starts serving traffic.
+9. Reconciles CDN domains when the origin has `cdn.domains.enabled`.
+10. Starts background sync tasks.
+11. Starts serving traffic.
 
 Startup fails if any initial origin refresh, edge config parse, or template compilation fails.
 
@@ -80,6 +81,8 @@ CDN refresh runs only after successful activation. It uses the freshness diff fo
 CloudFront receives invalidation paths such as `/index.html` or `/*`. Cloudflare receives full URLs, built from `url_prefixes` or exact host mappings.
 
 CDN purge failures do not roll back the activated generation. RenderMesh records the error in the runtime snapshot and keeps serving the activated local mirror.
+
+Domain reconciliation failures also do not roll back the activated generation. They are recorded separately in the runtime snapshot.
 
 ## Runtime Debug API
 

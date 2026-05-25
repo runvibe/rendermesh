@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use anyhow::{anyhow, Result};
 
 use crate::{
-    dto::manifest::{CdnConfig, OriginConfig, RenderMeshManifest},
+    dto::manifest::{CdnConfig, DomainReconcileMode, OriginConfig, RenderMeshManifest},
     repositories::manifest::ManifestRepository,
     services::config_format::parse_config,
 };
@@ -200,6 +200,7 @@ fn validate_cdn_config(origin_id: &str, cdn: Option<&CdnConfig>) -> Result<()> {
                     "origin {origin_id} cdn.distribution_id_env is required"
                 ));
             }
+            validate_cdn_domain_config(origin_id, config.domains.as_ref(), true)?;
         }
         Some(CdnConfig::Cloudflare(config)) => {
             if config.zone_id_env.trim().is_empty() {
@@ -215,10 +216,47 @@ fn validate_cdn_config(origin_id: &str, cdn: Option<&CdnConfig>) -> Result<()> {
                     ));
                 }
             }
+            validate_cdn_domain_config(origin_id, config.domains.as_ref(), false)?;
         }
         None => {}
     }
 
+    Ok(())
+}
+
+fn validate_cdn_domain_config(
+    origin_id: &str,
+    domains: Option<&crate::dto::manifest::CdnDomainConfig>,
+    cloudfront: bool,
+) -> Result<()> {
+    let Some(domains) = domains else {
+        return Ok(());
+    };
+    if !domains.enabled {
+        return Ok(());
+    }
+    if domains.origin_domain_env.trim().is_empty() {
+        return Err(anyhow!(
+            "origin {origin_id} cdn.domains.origin_domain_env is required"
+        ));
+    }
+    if cloudfront
+        && domains
+            .certificate_arn_env
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .is_empty()
+    {
+        return Err(anyhow!(
+            "origin {origin_id} cdn.domains.certificate_arn_env is required for CloudFront"
+        ));
+    }
+    if !cloudfront && domains.mode == DomainReconcileMode::CustomHostnames {
+        return Err(anyhow!(
+            "origin {origin_id} cdn.domains.mode custom_hostnames is not implemented"
+        ));
+    }
     Ok(())
 }
 
@@ -444,6 +482,7 @@ hosts:
         "url_prefixes": ["https://docs.test"]
       }
     }
+
   },
   "hosts": {
     "docs.test": {
@@ -463,6 +502,53 @@ hosts:
                 ));
             }
             other => panic!("expected local origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cdn_domain_reconciliation_config() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  loja:
+    type: s3
+    bucket: loja-bucket
+    endpoint_env: LOJA_ENDPOINT
+    region_env: LOJA_REGION
+    cdn:
+      provider: cloudfront
+      distribution_id_env: LOJA_DISTRIBUTION_ID
+      domains:
+        enabled: true
+        origin_domain_env: RENDERMESH_PUBLIC_ORIGIN
+        certificate_arn_env: LOJA_CERTIFICATE_ARN
+        include_wildcards: true
+        remove_extra_domains: true
+hosts:
+  megaloja.com.br:
+    origin: loja
+"#,
+        )
+        .expect("manifest parses");
+
+        let cdn = manifest.origins["loja"].cdn().expect("cdn config");
+        match cdn {
+            crate::dto::manifest::CdnConfig::CloudFront(config) => {
+                let domains = config.domains.as_ref().expect("domain config");
+                assert!(domains.enabled);
+                assert_eq!(domains.origin_domain_env, "RENDERMESH_PUBLIC_ORIGIN");
+                assert_eq!(
+                    domains.certificate_arn_env.as_deref(),
+                    Some("LOJA_CERTIFICATE_ARN")
+                );
+                assert!(domains.include_wildcards);
+                assert!(domains.remove_extra_domains);
+            }
+            other => panic!("expected cloudfront cdn, got {other:?}"),
         }
     }
 

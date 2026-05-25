@@ -46,6 +46,15 @@ impl OriginConfig {
     }
 }
 
+impl CdnConfig {
+    pub fn domains(&self) -> Option<&CdnDomainConfig> {
+        match self {
+            Self::CloudFront(config) => config.domains.as_ref(),
+            Self::Cloudflare(config) => config.domains.as_ref(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct S3OriginConfig {
@@ -86,6 +95,7 @@ pub struct CloudFrontCdnConfig {
     pub distribution_id_env: String,
     #[serde(default)]
     pub strategy: CdnRefreshStrategy,
+    pub domains: Option<CdnDomainConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -98,6 +108,7 @@ pub struct CloudflareCdnConfig {
     pub strategy: CdnRefreshStrategy,
     #[serde(default)]
     pub url_prefixes: Vec<String>,
+    pub domains: Option<CdnDomainConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -106,4 +117,32 @@ pub enum CdnRefreshStrategy {
     #[default]
     ChangedPaths,
     All,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CdnDomainConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub mode: DomainReconcileMode,
+    pub origin_domain_env: String,
+    pub certificate_arn_env: Option<String>,
+    #[serde(default = "default_true")]
+    pub proxied: bool,
+    #[serde(default)]
+    pub include_wildcards: bool,
+    #[serde(default)]
+    pub remove_extra_domains: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainReconcileMode {
+    #[default]
+    DnsRecords,
+    CustomHostnames,
+}
+
+fn default_true() -> bool {
+    true
 }

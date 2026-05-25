@@ -17,6 +17,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - HTML templates are compiled in memory and rendered only when edge params are returned.
 - Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
 - CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
+- CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
@@ -107,6 +108,10 @@ origins:
       provider: cloudfront
       distribution_id_env: MY_APP_CLOUDFRONT_DISTRIBUTION_ID
       strategy: changed_paths
+      domains:
+        enabled: true
+        origin_domain_env: RENDERMESH_PUBLIC_ORIGIN
+        certificate_arn_env: MY_APP_CLOUDFRONT_CERTIFICATE_ARN
 
 hosts:
   myapp.com:

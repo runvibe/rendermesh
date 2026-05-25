@@ -14,6 +14,7 @@ use crate::{
         origin_storage::OriginStorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
     },
     services::{
+        cdn_domains::OriginCdnDomains,
         cdn_refresh::OriginCdnRefresh,
         cors::CorsPolicy,
         edge_config::{default_edge_config, parse_edge_config},
@@ -56,6 +57,7 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
     let freshness_indexes = OriginFreshnessIndexes::default();
     let origin_runtime = OriginRuntimeStore::default();
     let cdn_by_origin = build_origin_cdns(&manifest).await?;
+    let cdn_domains_by_origin = build_origin_cdn_domains(&manifest).await?;
 
     let mut storage_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
@@ -77,6 +79,9 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
             downloaded = report.downloaded,
             "initial origin sync completed"
         );
+        if let Some(cdn_domains) = cdn_domains_by_origin.get(origin_id) {
+            reconcile_origin_cdn_domains(origin_id, &manifest, cdn_domains, &origin_runtime).await;
+        }
         storage_by_origin.insert(origin_id.clone(), storage);
     }
 
@@ -131,6 +136,58 @@ async fn build_origin_cdns(
     }
 
     Ok(output)
+}
+
+async fn build_origin_cdn_domains(
+    manifest: &RenderMeshManifest,
+) -> Result<BTreeMap<String, OriginCdnDomains>> {
+    let mut output = BTreeMap::new();
+
+    for (origin_id, origin) in &manifest.origins {
+        let Some(config) = origin.cdn() else {
+            continue;
+        };
+        if let Some(domains) = OriginCdnDomains::from_config(config).await? {
+            output.insert(origin_id.clone(), domains);
+        }
+    }
+
+    Ok(output)
+}
+
+async fn reconcile_origin_cdn_domains(
+    origin_id: &str,
+    manifest: &RenderMeshManifest,
+    cdn_domains: &OriginCdnDomains,
+    origin_runtime: &OriginRuntimeStore,
+) {
+    match cdn_domains.reconcile(manifest, origin_id).await {
+        Ok(outcome) => {
+            tracing::info!(
+                origin = %origin_id,
+                provider = %outcome.provider,
+                status = %outcome.status,
+                added = outcome.added,
+                updated = outcome.updated,
+                removed = outcome.removed,
+                unchanged = outcome.unchanged,
+                "cdn domain reconciliation submitted"
+            );
+            origin_runtime.set_cdn_domain_result(
+                origin_id,
+                outcome.provider,
+                outcome.status,
+                outcome.added,
+                outcome.updated,
+                outcome.removed,
+                outcome.unchanged,
+            );
+        }
+        Err(error) => {
+            origin_runtime.set_cdn_domain_error(origin_id, error.to_string());
+            tracing::error!(origin = %origin_id, "cdn domain reconciliation failed: {error}");
+        }
+    }
 }
 
 fn exact_url_prefixes_for_origin(manifest: &RenderMeshManifest, origin_id: &str) -> Vec<String> {
@@ -248,6 +305,14 @@ where
         last_cdn_refreshed_at: None,
         last_cdn_submitted_items: None,
         last_cdn_error: None,
+        last_cdn_domain_provider: None,
+        last_cdn_domain_status: None,
+        last_cdn_domain_reconciled_at: None,
+        last_cdn_domain_added: None,
+        last_cdn_domain_updated: None,
+        last_cdn_domain_removed: None,
+        last_cdn_domain_unchanged: None,
+        last_cdn_domain_error: None,
     };
     tracing::info!(
         origin = %origin_id,
@@ -924,6 +989,123 @@ hosts:
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&requests[0].body).expect("json body"),
             json!({ "files": ["https://web.test/index.html"] })
+        );
+    }
+
+    #[tokio::test]
+    async fn build_render_runtime_reconciles_cloudflare_dns_domains() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/zones/zone-domains/purge_cache"))
+            .and(header("authorization", "Bearer token-domains"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "id": "purge-domains" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/zones/zone-domains/dns_records"))
+            .and(header("authorization", "Bearer token-domains"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/zones/zone-domains/dns_records"))
+            .and(header("authorization", "Bearer token-domains"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true,
+                "result": { "id": "record-1" }
+            })))
+            .mount(&server)
+            .await;
+        let _zone = EnvVarGuard::set("TEST_CF_DOMAIN_ZONE_ID", "zone-domains");
+        let _token = EnvVarGuard::set("TEST_CF_DOMAIN_API_TOKEN", "token-domains");
+        let _api_base = EnvVarGuard::set("TEST_CF_DOMAIN_API_BASE", &server.uri());
+        let _origin = EnvVarGuard::set("TEST_CF_DOMAIN_ORIGIN", "rendermesh.example.com");
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let source_dir = config_dir.join("site");
+        let mirror_dir = temp.path().join("var/origins");
+        tokio::fs::create_dir_all(&source_dir)
+            .await
+            .expect("create source dir");
+        tokio::fs::write(source_dir.join("index.html"), "<h1>Hello</h1>")
+            .await
+            .expect("write index");
+
+        let manifest_path = config_dir.join("rendermesh.yaml");
+        tokio::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 60
+origins:
+  loja:
+    type: local
+    path: ./site
+    cdn:
+      provider: cloudflare
+      zone_id_env: TEST_CF_DOMAIN_ZONE_ID
+      api_token_env: TEST_CF_DOMAIN_API_TOKEN
+      api_base_env: TEST_CF_DOMAIN_API_BASE
+      strategy: changed_paths
+      domains:
+        enabled: true
+        mode: dns_records
+        origin_domain_env: TEST_CF_DOMAIN_ORIGIN
+        proxied: true
+hosts:
+  megaloja.com.br:
+    origin: loja
+  "*.megaloja.com.br":
+    origin: loja
+"#,
+                mirror_dir.display()
+            ),
+        )
+        .await
+        .expect("write manifest");
+
+        let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+            .await
+            .expect("runtime builds");
+
+        let snapshot = runtime.origin_runtime.get("loja").expect("origin snapshot");
+        assert_eq!(
+            snapshot.last_cdn_domain_provider.as_deref(),
+            Some("cloudflare")
+        );
+        assert_eq!(
+            snapshot.last_cdn_domain_status.as_deref(),
+            Some("submitted")
+        );
+        assert_eq!(snapshot.last_cdn_domain_added, Some(1));
+        assert_eq!(snapshot.last_cdn_domain_unchanged, Some(0));
+
+        let requests = server.received_requests().await.expect("requests");
+        let create_request = requests
+            .iter()
+            .find(|request| {
+                request.method.as_str() == "POST"
+                    && request.url.path() == "/zones/zone-domains/dns_records"
+            })
+            .expect("dns create request");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&create_request.body).expect("json body"),
+            json!({
+                "type": "CNAME",
+                "name": "megaloja.com.br",
+                "content": "rendermesh.example.com",
+                "proxied": true,
+                "ttl": 1
+            })
         );
     }
 
