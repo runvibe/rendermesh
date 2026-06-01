@@ -307,6 +307,62 @@ missing:
     }
 
     #[tokio::test]
+    async fn sync_origin_prefers_dot_rendermesh_edge_config_over_legacy_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let mirror = LocalMirrorRepository::new(&root);
+        let syncer = MirrorSyncService::new(&root);
+        let store = EdgeConfigStore::from_configs(BTreeMap::new());
+        let storage = StaticStorage::new(BTreeMap::from([
+            (
+                "_rendermesh/edge.yaml".to_string(),
+                edge_object(
+                    r#"
+version: 1
+edge:
+  root_object: /legacy.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /legacy.html
+"#,
+                ),
+            ),
+            (
+                ".rendermesh/edge.yaml".to_string(),
+                yaml_edge_object(
+                    ".rendermesh/edge.yaml",
+                    r#"
+version: 1
+edge:
+  root_object: /dot.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /dot.html
+"#,
+                ),
+            ),
+        ]));
+
+        let template_store = TemplateStore::default();
+        sync_origin_and_refresh_edge_config(
+            "web",
+            &syncer,
+            &storage,
+            None,
+            &mirror,
+            &store,
+            &template_store,
+        )
+        .await
+        .expect("sync succeeds");
+
+        let config = store.get("web").expect("config refreshed");
+        assert_eq!(config.edge.root_object, "/dot.html");
+    }
+
+    #[tokio::test]
     async fn sync_origin_refreshes_edge_config_store_from_json_object() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("origins");
@@ -350,6 +406,35 @@ missing:
         let config = store.get("web").expect("json config refreshed");
         assert_eq!(config.edge.root_object, "/json-sync.html");
         assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_reads_dot_rendermesh_json_when_yaml_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            ".rendermesh/edge.json",
+            r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/dot-json.html",
+    "auto_rewrite_index": false
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/dot-json.html"
+  }
+}
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("json config loaded");
+        assert_eq!(config.edge.root_object, "/dot-json.html");
     }
 
     #[tokio::test]
@@ -450,6 +535,45 @@ missing:
         let config = store.get("web").expect("config loaded");
         assert_eq!(config.edge.root_object, "/yaml.html");
         assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_prefers_dot_rendermesh_yaml_over_legacy_yaml() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.yaml",
+            r#"
+version: 1
+edge:
+  root_object: /legacy-yaml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /legacy-yaml.html
+"#,
+        )
+        .await;
+        write_mirror_file(
+            temp.path(),
+            ".rendermesh/edge.yaml",
+            r#"
+version: 1
+edge:
+  root_object: /dot-yaml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /dot-yaml.html
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("config loaded");
+        assert_eq!(config.edge.root_object, "/dot-yaml.html");
     }
 
     #[tokio::test]
@@ -613,14 +737,14 @@ missing:
         let config_dir = temp.path().join("config");
         let source_dir = config_dir.join("site");
         let mirror_dir = temp.path().join("var/origins");
-        tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+        tokio::fs::create_dir_all(source_dir.join(".rendermesh"))
             .await
             .expect("create source dir");
         tokio::fs::write(source_dir.join("index.html"), "<h1>{{title}}</h1>")
             .await
             .expect("write index");
         tokio::fs::write(
-            source_dir.join("_rendermesh/edge.yaml"),
+            source_dir.join(".rendermesh/edge.yaml"),
             r#"
 version: 1
 edge:
@@ -894,15 +1018,19 @@ hosts:
         tokio::fs::write(path, body).await.expect("write file");
     }
 
-    fn edge_object(body: &str) -> RemoteObject {
+    fn yaml_edge_object(key: &str, body: &str) -> RemoteObject {
         RemoteObject {
-            key: "_rendermesh/edge.yaml".to_string(),
+            key: key.to_string(),
             body: Bytes::from(body.to_string()),
             etag: Some("edge".to_string()),
             last_modified: None,
             content_type: Some("application/yaml".to_string()),
             cache_control: None,
         }
+    }
+
+    fn edge_object(body: &str) -> RemoteObject {
+        yaml_edge_object("_rendermesh/edge.yaml", body)
     }
 
     fn json_edge_object(key: &str, body: &str) -> RemoteObject {

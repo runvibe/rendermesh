@@ -30,7 +30,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 
 - [Overview](docs/overview.md): product concepts, request lifecycle, and MVP scope.
 - [Configuration](docs/configuration.md): global manifest, environment variables, S3 origins, local origins, hosts, and credentials.
-- [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
+- [Origin Edge Config](docs/edge-config.md): `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
 - [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
@@ -143,7 +143,7 @@ Relative local origin paths are resolved from the directory containing the globa
 
 ## Minimal Origin Edge Config
 
-Each origin can include `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` in its source:
+Each origin can include `/.rendermesh/edge.yaml`, `/.rendermesh/edge.yml`, or `/.rendermesh/edge.json` in its source:
 
 ```yaml
 version: 1
@@ -157,9 +157,9 @@ missing:
   page: /index.html
 ```
 
-If this file is missing, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+If this file is missing, RenderMesh falls back to the deprecated `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` paths. When a deprecated path is used, the server logs a warning for that origin. If no edge config file exists, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
 
-The `/_rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync, but never serves `/_rendermesh/*` objects through public render requests or through an edge-selected `file_path`.
+The `/.rendermesh` and `/_rendermesh` namespaces are origin-internal. RenderMesh loads config files from them during sync, but never serves objects under either namespace through public render requests or through an edge-selected `file_path`.
 
 ## Manual Origin Sync
 

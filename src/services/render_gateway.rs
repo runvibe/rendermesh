@@ -812,7 +812,10 @@ fn edge_failure_status(error: &anyhow::Error) -> StatusCode {
 
 fn is_reserved_rendermesh_path(path: &str) -> bool {
     let path = path.trim_start_matches('/');
-    path == "_rendermesh" || path.starts_with("_rendermesh/")
+    path == ".rendermesh"
+        || path.starts_with(".rendermesh/")
+        || path == "_rendermesh"
+        || path.starts_with("_rendermesh/")
 }
 
 fn log_edge_config_error(origin_id: &str, error: EdgeConfigStoreError) {

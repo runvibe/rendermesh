@@ -24,10 +24,36 @@ use crate::{
     },
 };
 
-const EDGE_CONFIG_PATHS: [&str; 3] = [
-    "/_rendermesh/edge.yaml",
-    "/_rendermesh/edge.yml",
-    "/_rendermesh/edge.json",
+struct EdgeConfigPath {
+    path: &'static str,
+    deprecated: bool,
+}
+
+const EDGE_CONFIG_PATHS: [EdgeConfigPath; 6] = [
+    EdgeConfigPath {
+        path: "/.rendermesh/edge.yaml",
+        deprecated: false,
+    },
+    EdgeConfigPath {
+        path: "/.rendermesh/edge.yml",
+        deprecated: false,
+    },
+    EdgeConfigPath {
+        path: "/.rendermesh/edge.json",
+        deprecated: false,
+    },
+    EdgeConfigPath {
+        path: "/_rendermesh/edge.yaml",
+        deprecated: true,
+    },
+    EdgeConfigPath {
+        path: "/_rendermesh/edge.yml",
+        deprecated: true,
+    },
+    EdgeConfigPath {
+        path: "/_rendermesh/edge.json",
+        deprecated: true,
+    },
 ];
 
 pub(crate) type OriginFreshnessIndexes = Arc<RwLock<BTreeMap<String, OriginFreshnessIndex>>>;
@@ -379,8 +405,15 @@ pub(crate) async fn load_origin_edge_config(
     origin_id: &str,
     mirror: &LocalMirrorRepository,
 ) -> Result<crate::dto::edge::EdgeConfig> {
-    for path in EDGE_CONFIG_PATHS {
-        if let Some(object) = mirror.read_object(origin_id, path).await? {
+    for candidate in EDGE_CONFIG_PATHS {
+        if let Some(object) = mirror.read_object(origin_id, candidate.path).await? {
+            if candidate.deprecated {
+                tracing::warn!(
+                    origin = %origin_id,
+                    path = %candidate.path,
+                    "legacy /_rendermesh edge config path is deprecated; migrate origin config to /.rendermesh"
+                );
+            }
             let content = String::from_utf8(object.body.to_vec())?;
             return Ok(parse_edge_config(&content)?);
         }

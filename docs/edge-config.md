@@ -2,15 +2,18 @@
 
 Each origin can include an edge config inside its bucket. RenderMesh checks these paths in order:
 
-1. `/_rendermesh/edge.yaml`
-2. `/_rendermesh/edge.yml`
-3. `/_rendermesh/edge.json`
+1. `/.rendermesh/edge.yaml`
+2. `/.rendermesh/edge.yml`
+3. `/.rendermesh/edge.json`
+4. `/_rendermesh/edge.yaml` (deprecated)
+5. `/_rendermesh/edge.yml` (deprecated)
+6. `/_rendermesh/edge.json` (deprecated)
 
 The file controls request behavior for that origin. YAML and JSON use the same schema.
 
-If the file is missing, RenderMesh uses safe defaults. If the file exists but is invalid, only that origin becomes unavailable and requests for it return `500` until a valid config is synced.
+If a deprecated `/_rendermesh` path is used, RenderMesh logs a warning for that origin and continues loading the config for compatibility. If the file is missing, RenderMesh uses safe defaults. If the file exists but is invalid, only that origin becomes unavailable and requests for it return `500` until a valid config is synced.
 
-The `/_rendermesh` namespace is reserved for RenderMesh internal files. These objects are loaded during sync, but are never served by public render requests or by an edge response that selects `file_path`.
+The `/.rendermesh` and `/_rendermesh` namespaces are reserved for RenderMesh internal files. These objects are loaded during sync, but are never served by public render requests or by an edge response that selects `file_path`.
 
 ## Minimal Config
 
@@ -114,4 +117,4 @@ The MVP supports global per-origin hooks. Per-route hooks and after-response hoo
 
 ## Local Example
 
-See [examples/local/bucket/_rendermesh/edge.yaml](../examples/local/bucket/_rendermesh/edge.yaml) for a working config with redirects, rewrites, auto-index, missing behavior, and an edge hook.
+See [examples/local/bucket/.rendermesh/edge.yaml](../examples/local/bucket/.rendermesh/edge.yaml) for a working config with redirects, rewrites, auto-index, missing behavior, and an edge hook.

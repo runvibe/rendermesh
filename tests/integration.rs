@@ -209,7 +209,7 @@ async fn manual_origin_sync_refreshes_local_origin_without_restart() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("site");
     let mirror_dir = temp.path().join("mirror");
-    tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+    tokio::fs::create_dir_all(source_dir.join(".rendermesh"))
         .await
         .expect("create source");
     write_local_edge_config(&source_dir, "serve")
@@ -307,7 +307,7 @@ async fn manual_origin_sync_returns_not_found_for_unknown_origin() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_dir = temp.path().join("site");
     let mirror_dir = temp.path().join("mirror");
-    tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+    tokio::fs::create_dir_all(source_dir.join(".rendermesh"))
         .await
         .expect("create source");
     write_local_edge_config(&source_dir, "serve")
@@ -455,7 +455,7 @@ async fn write_local_edge_config(source_dir: &Path, missing_action: &str) -> std
         _ => ("page", "/index.html"),
     };
     tokio::fs::write(
-        source_dir.join("_rendermesh/edge.yaml"),
+        source_dir.join(".rendermesh/edge.yaml"),
         format!(
             r#"
 version: 1
