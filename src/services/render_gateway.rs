@@ -606,6 +606,11 @@ impl RenderGatewayService {
     }
 
     async fn safe_read_object(&self, origin_id: &str, path: &str) -> Result<Option<LocalObject>> {
+        if is_reserved_rendermesh_path(path) {
+            tracing::warn!(origin = %origin_id, path = %path, "reserved RenderMesh object path denied");
+            return Ok(None);
+        }
+
         let object_path = match self.mirror.object_path(origin_id, path) {
             Ok(path) => path,
             Err(error) => {
@@ -803,6 +808,11 @@ fn edge_failure_status(error: &anyhow::Error) -> StatusCode {
     } else {
         StatusCode::BAD_GATEWAY
     }
+}
+
+fn is_reserved_rendermesh_path(path: &str) -> bool {
+    let path = path.trim_start_matches('/');
+    path == "_rendermesh" || path.starts_with("_rendermesh/")
 }
 
 fn log_edge_config_error(origin_id: &str, error: EdgeConfigStoreError) {

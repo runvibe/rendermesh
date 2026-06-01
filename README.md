@@ -159,6 +159,8 @@ missing:
 
 If this file is missing, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
 
+The `/_rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync, but never serves `/_rendermesh/*` objects through public render requests or through an edge-selected `file_path`.
+
 ## Manual Origin Sync
 
 Set `RENDERMESH_ADMIN_TOKEN` to enable the administrative manual sync endpoint:

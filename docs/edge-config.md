@@ -10,6 +10,8 @@ The file controls request behavior for that origin. YAML and JSON use the same s
 
 If the file is missing, RenderMesh uses safe defaults. If the file exists but is invalid, only that origin becomes unavailable and requests for it return `500` until a valid config is synced.
 
+The `/_rendermesh` namespace is reserved for RenderMesh internal files. These objects are loaded during sync, but are never served by public render requests or by an edge response that selects `file_path`.
+
 ## Minimal Config
 
 ```yaml

@@ -116,6 +116,27 @@ async fn malformed_object_path_is_treated_as_not_found() {
 }
 
 #[tokio::test]
+async fn reserved_rendermesh_object_path_is_not_publicly_served() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(
+        temp.path(),
+        "_rendermesh/edge.yaml",
+        "version: 1\nsecret: true\n",
+        None,
+    )
+    .await;
+    let service = test_gateway(temp.path().join("origins"));
+
+    let response = service
+        .handle(test_request(Method::GET, "/_rendermesh/edge.yaml"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(response.body, bytes::Bytes::from_static(b"not found"));
+}
+
+#[tokio::test]
 async fn auto_index_serves_directory_index() {
     let temp = tempfile::tempdir().expect("tempdir");
     write_object(temp.path(), "docs/index.html", "<h1>Docs</h1>", None).await;
@@ -333,6 +354,28 @@ async fn edge_file_path_outcome_serves_specified_file_with_edge_status() {
     );
     assert_header(&response, "x-edge", "file");
     assert_header(&response, "access-control-allow-origin", "https://web.test");
+}
+
+#[tokio::test]
+async fn edge_file_path_cannot_serve_reserved_rendermesh_object() {
+    let server = edge_server(
+        200,
+        serde_json::json!({
+            "file_path": "/_rendermesh/edge.yaml"
+        }),
+    )
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(temp.path(), "_rendermesh/edge.yaml", "version: 1\n", None).await;
+    let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
+
+    let response = service
+        .handle(test_request(Method::GET, "/from-edge"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
+    assert!(response.body.is_empty());
 }
 
 #[tokio::test]

@@ -41,6 +41,8 @@ Objects are mirrored under:
 
 RenderMesh also writes metadata sidecars under `.rendermesh-meta/`.
 
+Mirrored objects under `/_rendermesh` are internal control files. They remain available to the sync pipeline, but are blocked from public rendering and edge-selected `file_path` responses.
+
 ## Background Sync
 
 Each origin syncs periodically. The interval comes from:
