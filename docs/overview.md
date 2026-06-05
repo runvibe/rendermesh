@@ -41,7 +41,7 @@ The MVP includes:
 - Local origin mirroring.
 - Periodic background sync.
 - CloudFront and Cloudflare refresh after origin generation activation.
-- Per-origin edge config via `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, with deprecated `/_rendermesh` fallback.
+- Per-origin edge config via `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
 - Redirects, rewrites, root object, auto-index, and missing-file behavior.
 - Global per-origin edge hooks.
 - HTML-only Handlebars templates compiled in memory.

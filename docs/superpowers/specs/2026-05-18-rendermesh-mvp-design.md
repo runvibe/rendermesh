@@ -163,7 +163,7 @@ Rules:
   size to avoid unnecessary downloads.
 - Local metadata needed for response headers is persisted with the mirror.
 - The origin edge config is read from the local mirror at
-  `/_rendermesh/edge.yaml` after sync.
+  `/.rendermesh/edge.yaml` after sync.
 
 The local mirror is not a response cache. It is the required data plane for the
 MVP. Smart cache rules and invalidation remain outside the MVP.
@@ -224,7 +224,7 @@ Rules:
 Each origin attempts to load its edge behavior from the local mirror object:
 
 ```text
-/_rendermesh/edge.yaml
+/.rendermesh/edge.yaml
 ```
 
 If the object does not exist in the mirror, RenderMesh uses safe defaults and
@@ -495,7 +495,7 @@ Request handling order:
 3. Return `421 Misdirected Request` if no host matches.
 4. Select the origin.
 5. Load or reuse the origin edge config from the local mirror at
-   `/_rendermesh/edge.yaml`.
+   `/.rendermesh/edge.yaml`.
 6. Use defaults if the edge config object does not exist in the mirror.
 7. Handle method:
    - `OPTIONS`: return automatic CORS preflight.
@@ -565,7 +565,7 @@ The MVP should log structured events with:
 
 Warnings:
 
-- Missing `/_rendermesh/edge.yaml` for an origin.
+- Missing `/.rendermesh/edge.yaml` for an origin.
 - Edge hook returns headers-only payload and continues.
 
 Errors:

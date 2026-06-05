@@ -157,9 +157,9 @@ missing:
   page: /index.html
 ```
 
-If this file is missing, RenderMesh falls back to the deprecated `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` paths. When a deprecated path is used, the server logs a warning for that origin. If no edge config file exists, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+If no edge config file exists, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
 
-The `/.rendermesh` and `/_rendermesh` namespaces are origin-internal. RenderMesh loads config files from them during sync, but never serves objects under either namespace through public render requests or through an edge-selected `file_path`.
+The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync, but never serves objects under this namespace through public render requests or through an edge-selected `file_path`.
 
 ## Manual Origin Sync
 

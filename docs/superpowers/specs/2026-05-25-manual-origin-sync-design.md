@@ -5,7 +5,7 @@
 RenderMesh currently refreshes origins during startup and on each configured
 background interval. That keeps runtime traffic served from local mirrors, but
 operators cannot safely force an immediate refresh after urgent origin changes.
-When a bucket receives a corrected `/_rendermesh/edge.yaml`, a new `index.html`,
+When a bucket receives a corrected `/.rendermesh/edge.yaml`, a new `index.html`,
 or an updated HTML template, the only immediate operational workaround is to
 restart RenderMesh and rely on startup sync.
 
@@ -21,7 +21,7 @@ generation active when refresh fails.
 - Allow operators to force an immediate refresh for one origin.
 - Reuse the existing refresh pipeline instead of creating a separate path.
 - Keep origin activation atomic and generation-based.
-- Reload `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json` during manual sync.
+- Reload `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json` during manual sync.
 - Recompile HTML template ASTs before activating the new generation.
 - Submit configured CDN refresh after successful activation.
 - Return a clear HTTP response with the new origin generation and sync summary.
@@ -283,7 +283,7 @@ The docs should explain:
 - It uses the same activation semantics as background sync.
 - It requires `RENDERMESH_ADMIN_TOKEN`.
 - It is per-origin.
-- It is useful after uploading `/_rendermesh/edge.yaml`, templates, or urgent
+- It is useful after uploading `/.rendermesh/edge.yaml`, templates, or urgent
   static assets.
 - Restarting the deployment is no longer required for a normal origin refresh.
 
@@ -304,8 +304,8 @@ Service tests:
 - Manual sync downloads newly added source files.
 - Manual sync updates modified source files.
 - Manual sync removes deleted source files.
-- Manual sync reloads a changed `/_rendermesh/edge.yaml`.
-- Manual sync reloads a changed `/_rendermesh/edge.json`.
+- Manual sync reloads a changed `/.rendermesh/edge.yaml`.
+- Manual sync reloads a changed `/.rendermesh/edge.json`.
 - Manual sync recompiles changed HTML templates.
 - Manual sync removes deleted templates from the in-memory registry.
 - Manual sync keeps the previous generation active when edge config parsing

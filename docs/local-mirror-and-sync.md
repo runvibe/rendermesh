@@ -10,7 +10,7 @@ At startup, RenderMesh:
 2. Creates one storage adapter per origin.
 3. Lists each configured origin and builds an in-memory freshness index.
 4. Stages changed origin files under `.rendermesh-sync`.
-5. Loads each staged origin's edge config from `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, with deprecated `/_rendermesh` fallback.
+5. Loads each staged origin's edge config from `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`.
 6. Compiles staged HTML templates into the in-memory template store.
 7. Activates the staged mirror and runtime state after validation succeeds.
 8. Submits CDN refresh when the origin has `cdn` configured and the freshness diff has changes.
@@ -41,7 +41,7 @@ Objects are mirrored under:
 
 RenderMesh also writes metadata sidecars under `.rendermesh-meta/`.
 
-Mirrored objects under `/.rendermesh` or `/_rendermesh` are internal control files. They remain available to the sync pipeline, but are blocked from public rendering and edge-selected `file_path` responses.
+Mirrored objects under `/.rendermesh` are internal control files. They remain available to the sync pipeline, but are blocked from public rendering and edge-selected `file_path` responses.
 
 ## Background Sync
 
@@ -136,7 +136,7 @@ After a successful refresh, RenderMesh activates:
 - The origin freshness index.
 - The origin HTML template registry.
 
-This means changes to `/.rendermesh/edge.yaml`, `edge.yml`, `edge.json`, deprecated `/_rendermesh` config files, and HTML templates become active after the next successful sync.
+This means changes to `/.rendermesh/edge.yaml`, `edge.yml`, `edge.json`, and HTML templates become active after the next successful sync.
 
 Template compilation is incremental. Added or modified HTML candidates are compiled, removed templates are dropped, and files that stop being HTML are removed from the registry.
 
