@@ -161,6 +161,8 @@ If no edge config file exists, RenderMesh uses safe defaults. Invalid edge confi
 
 The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync and never serves objects under this namespace through public render requests. Edge hooks can still select any local mirror object with `file_path`, including files under `/.rendermesh`.
 
+Edge hook response fields use snake_case. A `file_path` value must start with `/`, for example `"/.rendermesh/config/data.json"`. If that selected file is missing from the local mirror, RenderMesh applies the origin's configured `missing` behavior.
+
 ## Manual Origin Sync
 
 Set `RENDERMESH_ADMIN_TOKEN` to enable the administrative manual sync endpoint:

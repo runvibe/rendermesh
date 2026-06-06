@@ -98,6 +98,16 @@ RenderMesh serves the selected file from the local mirror. Edge-selected `file_p
 
 If the selected file does not exist, RenderMesh executes the origin's configured `missing` behavior.
 
+`file_path` must be named exactly `file_path`, must start with `/`, must not contain `..`, and must not contain control characters. For example, a request to `https://example.com/data.json` can be intercepted by an edge hook and served from an internal mirrored file:
+
+```json
+{
+  "file_path": "/.rendermesh/config/data.json"
+}
+```
+
+The value `.rendermesh/config/data.json` is rejected because it does not start with `/`. The field name `file_Path` is ignored by the contract because edge payload fields are snake_case.
+
 ### Serve And Render A Specific File
 
 ```json
