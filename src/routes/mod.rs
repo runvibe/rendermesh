@@ -8,6 +8,11 @@ mod cors;
 pub mod render;
 pub mod system;
 
+#[derive(Clone)]
+pub struct SystemRouteConfig {
+    pub admin_token: Option<String>,
+}
+
 pub fn create_router(state: AppState, config: &AppConfig) -> Router {
     let api_router = Router::new().merge(system::router());
 
@@ -19,7 +24,11 @@ pub fn create_router(state: AppState, config: &AppConfig) -> Router {
         api_router
     };
 
-    let api_router = api_router.layer(cors::build_cors_layer(&config.cors, None));
+    let api_router = api_router
+        .layer(Extension(SystemRouteConfig {
+            admin_token: config.admin_token.clone(),
+        }))
+        .layer(cors::build_cors_layer(&config.cors, None));
 
     api_router
         .fallback(render::render)

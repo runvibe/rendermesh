@@ -61,6 +61,8 @@ The resolved HTML file is rendered with Handlebars using the params.
 
 RenderMesh selects `/index.html` from the local mirror and renders the compiled template for that path.
 
+Edge-selected `file_path` can select any mirrored origin file. If the selected file does not exist, RenderMesh executes the origin's configured missing-file behavior.
+
 ## Error Cases
 
 - Params for a non-HTML file return `415 Unsupported Media Type`.

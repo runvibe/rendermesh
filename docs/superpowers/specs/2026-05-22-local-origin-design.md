@@ -18,7 +18,7 @@ learn whether an origin came from S3 or from a local directory.
 - Keep the manifest format explicit with `type: local`.
 - Reuse the existing local mirror, edge config store, and template store.
 - Support local origins in YAML and JSON manifests.
-- Support `/_rendermesh/edge.yaml`, `edge.yml`, and `edge.json` inside local
+- Support `/.rendermesh/edge.yaml`, `edge.yml`, and `edge.json` inside local
   origins.
 - Keep path traversal protections for local source reads and mirror writes.
 - Make local origins useful for development, tests, self-hosted deployments, and
@@ -207,9 +207,9 @@ optimization for development environments.
 Local origins use the same bucket-internal paths, now interpreted relative to
 the local source root:
 
-- `/_rendermesh/edge.yaml`
-- `/_rendermesh/edge.yml`
-- `/_rendermesh/edge.json`
+- `/.rendermesh/edge.yaml`
+- `/.rendermesh/edge.yml`
+- `/.rendermesh/edge.json`
 
 Only HTML files from the mirrored local origin are compiled into the Handlebars
 template store. Non-HTML files remain static objects and are never compiled as

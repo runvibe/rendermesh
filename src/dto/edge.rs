@@ -76,6 +76,9 @@ pub struct EdgeHookContext {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct EdgeHookHttpRequest {
     pub url: String,
+    pub path: String,
+    pub querystring: String,
+    pub queryparams: BTreeMap<String, String>,
     pub method: String,
     pub headers: BTreeMap<String, String>,
     pub body: String,

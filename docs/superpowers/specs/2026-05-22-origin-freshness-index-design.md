@@ -88,7 +88,7 @@ pub struct OriginFileState {
 ```
 
 The stored `path` is the provider-independent object key used by the mirror, for
-example `index.html` or `_rendermesh/edge.yaml`. It must never be absolute and
+example `index.html` or `.rendermesh/edge.yaml`. It must never be absolute and
 must never contain parent-directory traversal.
 
 ## Provider Contract
@@ -257,7 +257,7 @@ var/rendermesh/
 ├── origins/
 │   ├── my_app/
 │   │   ├── index.html
-│   │   ├── _rendermesh/edge.yaml
+│   │   ├── .rendermesh/edge.yaml
 │   │   └── .rendermesh-meta/
 │   └── other_app/
 └── .rendermesh-sync/

@@ -33,6 +33,7 @@ pub struct AppConfig {
     pub body_limit_bytes: usize,
     pub otel_enabled: bool,
     pub rendermesh_manifest: String,
+    pub admin_token: Option<String>,
 }
 
 impl AppConfig {
@@ -56,6 +57,10 @@ impl AppConfig {
         let otel_enabled = otel_enabled_from_env();
         let rendermesh_manifest = std::env::var("RENDERMESH_MANIFEST")
             .unwrap_or_else(|_| "./rendermesh.yaml".to_string());
+        let admin_token = std::env::var("RENDERMESH_ADMIN_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         Ok(Self {
             host,
@@ -64,6 +69,7 @@ impl AppConfig {
             body_limit_bytes,
             otel_enabled,
             rendermesh_manifest,
+            admin_token,
         })
     }
 
@@ -131,10 +137,22 @@ mod tests {
     fn app_config_does_not_require_external_database_url() {
         let _guard = ENV_LOCK.lock().expect("env lock");
         let _database_url = EnvVarGuard::unset("DATABASE_URL");
+        let _admin_token = EnvVarGuard::unset("RENDERMESH_ADMIN_TOKEN");
 
         let config = AppConfig::from_env().expect("config should parse without a database");
 
         assert_eq!(config.rendermesh_manifest, "./rendermesh.yaml");
+        assert_eq!(config.admin_token, None);
+    }
+
+    #[test]
+    fn app_config_reads_admin_token_from_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _admin_token = EnvVarGuard::set("RENDERMESH_ADMIN_TOKEN", "secret");
+
+        let config = AppConfig::from_env().expect("config should parse");
+
+        assert_eq!(config.admin_token.as_deref(), Some("secret"));
     }
 
     struct EnvVarGuard {

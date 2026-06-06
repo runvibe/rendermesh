@@ -19,6 +19,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
+- Authorized operators can force an immediate per-origin sync without restarting the service.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
 
 ## Project Status
@@ -29,7 +30,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 
 - [Overview](docs/overview.md): product concepts, request lifecycle, and MVP scope.
 - [Configuration](docs/configuration.md): global manifest, environment variables, S3 origins, local origins, hosts, and credentials.
-- [Origin Edge Config](docs/edge-config.md): `/_rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
+- [Origin Edge Config](docs/edge-config.md): `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
 - [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
@@ -142,7 +143,7 @@ Relative local origin paths are resolved from the directory containing the globa
 
 ## Minimal Origin Edge Config
 
-Each origin can include `/_rendermesh/edge.yaml`, `/_rendermesh/edge.yml`, or `/_rendermesh/edge.json` in its source:
+Each origin can include `/.rendermesh/edge.yaml`, `/.rendermesh/edge.yml`, or `/.rendermesh/edge.json` in its source:
 
 ```yaml
 version: 1
@@ -156,7 +157,29 @@ missing:
   page: /index.html
 ```
 
-If this file is missing, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+If no edge config file exists, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
+
+The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync and never serves objects under this namespace through public render requests. Edge hooks can still select any local mirror object with `file_path`, including files under `/.rendermesh`.
+
+Edge hook response fields use snake_case. A `file_path` value must start with `/`, for example `"/.rendermesh/config/data.json"`. If that selected file is missing from the local mirror, RenderMesh applies the origin's configured `missing` behavior.
+
+## Manual Origin Sync
+
+Set `RENDERMESH_ADMIN_TOKEN` to enable the administrative manual sync endpoint:
+
+```bash
+export RENDERMESH_ADMIN_TOKEN=change-me
+```
+
+Force one origin to refresh immediately:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $RENDERMESH_ADMIN_TOKEN" \
+  http://127.0.0.1:3000/_rendermesh/origins/my_app/sync
+```
+
+Manual sync runs the same atomic activation pipeline as startup and background sync. If listing, edge config parsing, or HTML template compilation fails, RenderMesh keeps the previous generation active. If `RENDERMESH_ADMIN_TOKEN` is not set, the endpoint returns `403`.
 
 ## Edge Hook Contract
 
@@ -171,6 +194,11 @@ When an origin defines edge hooks, RenderMesh sends a `POST` request to the conf
   },
   "request": {
     "url": "https://myapp.com/path?query=1",
+    "path": "/path",
+    "querystring": "query=1",
+    "queryparams": {
+      "query": "1"
+    },
     "method": "GET",
     "headers": {},
     "body": ""

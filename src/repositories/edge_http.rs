@@ -105,6 +105,9 @@ mod tests {
                 },
                 "request": {
                     "url": "https://app.test/",
+                    "path": "/",
+                    "querystring": "",
+                    "queryparams": {},
                     "method": "GET",
                     "headers": {},
                     "body": ""
@@ -130,6 +133,9 @@ mod tests {
                     },
                     request: EdgeHookHttpRequest {
                         url: "https://app.test/".to_string(),
+                        path: "/".to_string(),
+                        querystring: String::new(),
+                        queryparams: BTreeMap::new(),
                         method: "GET".to_string(),
                         headers: BTreeMap::new(),
                         body: String::new(),

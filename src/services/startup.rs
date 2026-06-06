@@ -1,9 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    path::Path,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
 
@@ -11,33 +6,39 @@ use crate::{
     dto::manifest::RenderMeshManifest,
     repositories::{
         local_mirror::LocalMirrorRepository, manifest::ManifestRepository,
-        origin_storage::OriginStorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
+        origin_storage::OriginStorageRepository, sync::MirrorSyncService,
     },
     services::{
         cdn_domains::OriginCdnDomains,
         cdn_refresh::OriginCdnRefresh,
         cors::CorsPolicy,
-        edge_config::{default_edge_config, parse_edge_config},
         edge_config_store::EdgeConfigStore,
-        freshness::OriginFreshnessIndex,
         manifest::{load_manifest, HostResolver},
-        origin_runtime::{OriginRuntimeStore, OriginSnapshotDebug},
+        origin_refresh::{OriginFreshnessIndexes, OriginRefreshService, OriginRefreshTrigger},
+        origin_runtime::OriginRuntimeStore,
         render_gateway::RenderGatewayService,
         template_store::TemplateStore,
     },
 };
 
-const EDGE_CONFIG_PATHS: [&str; 3] = [
-    "/_rendermesh/edge.yaml",
-    "/_rendermesh/edge.yml",
-    "/_rendermesh/edge.json",
-];
-
-type OriginFreshnessIndexes = Arc<RwLock<BTreeMap<String, OriginFreshnessIndex>>>;
+fn origin_refresh_error_to_anyhow(
+    error: crate::services::origin_refresh::OriginRefreshError,
+) -> anyhow::Error {
+    match error {
+        crate::services::origin_refresh::OriginRefreshError::NotFound => {
+            anyhow::anyhow!("origin not found during startup sync")
+        }
+        crate::services::origin_refresh::OriginRefreshError::AlreadyRunning => {
+            anyhow::anyhow!("origin sync already running during startup")
+        }
+        crate::services::origin_refresh::OriginRefreshError::Failed(error) => error,
+    }
+}
 
 pub struct RenderRuntime {
     pub render_gateway: RenderGatewayService,
     pub origin_runtime: OriginRuntimeStore,
+    pub origin_refresh: OriginRefreshService,
 }
 
 pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewayService> {
@@ -62,31 +63,10 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
     let mut storage_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
         let storage = OriginStorageRepository::from_origin_config(origin, manifest_dir).await?;
-        let cdn_refresh = cdn_by_origin.get(origin_id);
-        let report = refresh_origin_snapshot(
-            origin_id,
-            &syncer,
-            &storage,
-            cdn_refresh,
-            &edge_configs,
-            &template_store,
-            &freshness_indexes,
-            &origin_runtime,
-        )
-        .await?;
-        tracing::info!(
-            origin = %origin_id,
-            downloaded = report.downloaded,
-            "initial origin sync completed"
-        );
-        if let Some(cdn_domains) = cdn_domains_by_origin.get(origin_id) {
-            reconcile_origin_cdn_domains(origin_id, &manifest, cdn_domains, &origin_runtime).await;
-        }
         storage_by_origin.insert(origin_id.clone(), storage);
     }
 
-    spawn_background_sync(
-        manifest.clone(),
+    let origin_refresh = OriginRefreshService::new(
         syncer,
         edge_configs.clone(),
         template_store.clone(),
@@ -95,6 +75,23 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         storage_by_origin,
         cdn_by_origin,
     );
+
+    for origin_id in manifest.origins.keys() {
+        let report = origin_refresh
+            .refresh_origin(origin_id, OriginRefreshTrigger::Startup)
+            .await
+            .map_err(origin_refresh_error_to_anyhow)?;
+        tracing::info!(
+            origin = %origin_id,
+            downloaded = report.downloaded_files,
+            "initial origin sync completed"
+        );
+        if let Some(cdn_domains) = cdn_domains_by_origin.get(origin_id) {
+            reconcile_origin_cdn_domains(origin_id, &manifest, cdn_domains, &origin_runtime).await;
+        }
+    }
+
+    spawn_background_sync(manifest.clone(), origin_refresh.clone());
 
     let render_gateway = RenderGatewayService::new_with_stores_and_origin_buckets(
         HostResolver::new(&manifest)?,
@@ -108,6 +105,7 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
     Ok(RenderRuntime {
         render_gateway,
         origin_runtime,
+        origin_refresh,
     })
 }
 
@@ -199,247 +197,9 @@ fn exact_url_prefixes_for_origin(manifest: &RenderMeshManifest, origin_id: &str)
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) async fn load_edge_configs<I>(
-    origin_ids: I,
-    mirror: &LocalMirrorRepository,
-) -> EdgeConfigStore
-where
-    I: IntoIterator<Item = String>,
-{
-    let store = EdgeConfigStore::from_configs(BTreeMap::new());
-    for origin_id in origin_ids {
-        refresh_edge_config(&origin_id, mirror, &store).await;
-    }
-    store
-}
-
-#[cfg(test)]
-pub(crate) async fn sync_origin_and_refresh_edge_config<S>(
-    origin_id: &str,
-    syncer: &MirrorSyncService,
-    storage: &S,
-    cdn_refresh: Option<&OriginCdnRefresh>,
-    _mirror: &LocalMirrorRepository,
-    edge_configs: &EdgeConfigStore,
-    template_store: &TemplateStore,
-) -> Result<()>
-where
-    S: RemoteStorage,
-{
-    let freshness_indexes = OriginFreshnessIndexes::default();
-    let origin_runtime = OriginRuntimeStore::default();
-    let report = refresh_origin_snapshot(
-        origin_id,
-        syncer,
-        storage,
-        cdn_refresh,
-        edge_configs,
-        template_store,
-        &freshness_indexes,
-        &origin_runtime,
-    )
-    .await?;
-    tracing::info!(
-        origin = %origin_id,
-        downloaded = report.downloaded,
-        "origin sync completed"
-    );
-    Ok(())
-}
-
-pub(crate) async fn refresh_origin_snapshot<S>(
-    origin_id: &str,
-    syncer: &MirrorSyncService,
-    storage: &S,
-    cdn_refresh: Option<&OriginCdnRefresh>,
-    edge_configs: &EdgeConfigStore,
-    template_store: &TemplateStore,
-    freshness_indexes: &OriginFreshnessIndexes,
-    origin_runtime: &OriginRuntimeStore,
-) -> Result<crate::repositories::sync::SyncReport>
-where
-    S: RemoteStorage,
-{
-    let previous_index = freshness_indexes
-        .read()
-        .expect("freshness index lock")
-        .get(origin_id)
-        .cloned();
-    let staged = syncer
-        .stage_origin_sync(origin_id, storage, previous_index.as_ref())
-        .await?;
-    let (stage_mirror, stage_origin_id) = staged_origin_mirror(&staged.staging_dir)?;
-    let edge_config = load_origin_edge_config(&stage_origin_id, &stage_mirror).await?;
-    let template_registry = template_store
-        .compile_template_update_from_mirror(
-            origin_id,
-            &stage_origin_id,
-            &stage_mirror,
-            &staged.diff,
-        )
-        .await?;
-    let next_index = staged.index.clone();
-    let diff = staged.diff.clone();
-    let report = staged.report.clone();
-    let next_generation = origin_runtime
-        .get(origin_id)
-        .map(|snapshot| snapshot.generation + 1)
-        .unwrap_or(1);
-    let activated_at = chrono::Utc::now().to_rfc3339();
-    let snapshot = OriginSnapshotDebug {
-        origin_id: origin_id.to_string(),
-        generation: next_generation,
-        activated_at,
-        captured_at: next_index.captured_at.to_rfc3339(),
-        known_files: next_index.files.len(),
-        added_files: staged.diff.added.len(),
-        modified_files: staged.diff.modified.len(),
-        removed_files: staged.diff.removed.len(),
-        unchanged_files: staged.diff.unchanged.len(),
-        downloaded_files: report.downloaded,
-        last_error: None,
-        last_cdn_provider: None,
-        last_cdn_status: None,
-        last_cdn_request_id: None,
-        last_cdn_refreshed_at: None,
-        last_cdn_submitted_items: None,
-        last_cdn_error: None,
-        last_cdn_domain_provider: None,
-        last_cdn_domain_status: None,
-        last_cdn_domain_reconciled_at: None,
-        last_cdn_domain_added: None,
-        last_cdn_domain_updated: None,
-        last_cdn_domain_removed: None,
-        last_cdn_domain_unchanged: None,
-        last_cdn_domain_error: None,
-    };
-    tracing::info!(
-        origin = %origin_id,
-        generation = next_generation,
-        listed_files = staged.index.files.len(),
-        added_files = staged.diff.added.len(),
-        modified_files = staged.diff.modified.len(),
-        removed_files = staged.diff.removed.len(),
-        unchanged_files = staged.diff.unchanged.len(),
-        downloaded = report.downloaded,
-        "origin freshness refresh staged"
-    );
-
-    syncer.activate_staged_origin(staged).await?;
-    edge_configs.set_valid(origin_id, edge_config);
-    template_store.set_origin_registry(origin_id, template_registry);
-    freshness_indexes
-        .write()
-        .expect("freshness index lock")
-        .insert(origin_id.to_string(), next_index);
-    origin_runtime.set_snapshot(snapshot);
-    if let Some(cdn_refresh) = cdn_refresh {
-        match cdn_refresh
-            .refresh_after_activation(origin_id, next_generation, &diff)
-            .await
-        {
-            Ok(Some(outcome)) => {
-                tracing::info!(
-                    origin = %origin_id,
-                    generation = next_generation,
-                    provider = %outcome.provider,
-                    status = %outcome.status,
-                    submitted_items = outcome.submitted_items,
-                    changed_count = outcome.changed_count,
-                    "cdn refresh submitted"
-                );
-                origin_runtime.set_cdn_result(
-                    origin_id,
-                    outcome.provider,
-                    outcome.status,
-                    outcome.request_id,
-                    outcome.submitted_items,
-                );
-            }
-            Ok(None) => {
-                tracing::debug!(
-                    origin = %origin_id,
-                    generation = next_generation,
-                    "cdn refresh skipped because origin has no changes"
-                );
-            }
-            Err(error) => {
-                origin_runtime.set_cdn_error(origin_id, error.to_string());
-                tracing::error!(
-                    origin = %origin_id,
-                    generation = next_generation,
-                    "cdn refresh failed after origin activation: {error}"
-                );
-            }
-        }
-    }
-    tracing::info!(origin = %origin_id, generation = next_generation, "origin freshness refresh activated");
-
-    Ok(report)
-}
-
-fn staged_origin_mirror(staging_dir: &Path) -> Result<(LocalMirrorRepository, String)> {
-    let root = staging_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("staging dir has no parent"))?;
-    let origin_id = staging_dir
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| anyhow::anyhow!("staging dir has invalid origin id"))?;
-    Ok((LocalMirrorRepository::new(root), origin_id.to_string()))
-}
-
-#[cfg(test)]
-async fn refresh_edge_config(
-    origin_id: &str,
-    mirror: &LocalMirrorRepository,
-    edge_configs: &EdgeConfigStore,
-) {
-    match load_origin_edge_config(origin_id, mirror).await {
-        Ok(config) => edge_configs.set_valid(origin_id, config),
-        Err(error) => {
-            tracing::error!(origin = %origin_id, "failed to load edge config: {error}");
-            edge_configs.set_invalid(origin_id, error.to_string());
-        }
-    }
-}
-
-async fn load_origin_edge_config(
-    origin_id: &str,
-    mirror: &LocalMirrorRepository,
-) -> Result<crate::dto::edge::EdgeConfig> {
-    for path in EDGE_CONFIG_PATHS {
-        if let Some(object) = mirror.read_object(origin_id, path).await? {
-            let content = String::from_utf8(object.body.to_vec())?;
-            return Ok(parse_edge_config(&content)?);
-        }
-    }
-
-    tracing::warn!(
-        origin = %origin_id,
-        "origin has no edge config file; using default edge config"
-    );
-    Ok(default_edge_config())
-}
-
-fn spawn_background_sync(
-    manifest: Arc<RenderMeshManifest>,
-    syncer: MirrorSyncService,
-    edge_configs: EdgeConfigStore,
-    template_store: TemplateStore,
-    freshness_indexes: OriginFreshnessIndexes,
-    origin_runtime: OriginRuntimeStore,
-    storage_by_origin: BTreeMap<String, OriginStorageRepository>,
-    cdn_by_origin: BTreeMap<String, OriginCdnRefresh>,
-) {
-    for (origin_id, storage) in storage_by_origin {
-        let cdn_refresh = cdn_by_origin.get(&origin_id).cloned();
-        let syncer = syncer.clone();
-        let edge_configs = edge_configs.clone();
-        let template_store = template_store.clone();
-        let freshness_indexes = freshness_indexes.clone();
-        let origin_runtime = origin_runtime.clone();
+fn spawn_background_sync(manifest: Arc<RenderMeshManifest>, origin_refresh: OriginRefreshService) {
+    for origin_id in manifest.origins.keys().cloned().collect::<Vec<_>>() {
+        let origin_refresh = origin_refresh.clone();
         let interval_seconds = manifest
             .origins
             .get(&origin_id)
@@ -450,19 +210,10 @@ fn spawn_background_sync(
             let interval = Duration::from_secs(interval_seconds);
             loop {
                 tokio::time::sleep(interval).await;
-                if let Err(error) = refresh_origin_snapshot(
-                    &origin_id,
-                    &syncer,
-                    &storage,
-                    cdn_refresh.as_ref(),
-                    &edge_configs,
-                    &template_store,
-                    &freshness_indexes,
-                    &origin_runtime,
-                )
-                .await
+                if let Err(error) = origin_refresh
+                    .refresh_origin(&origin_id, OriginRefreshTrigger::Background)
+                    .await
                 {
-                    origin_runtime.set_error(&origin_id, error.to_string());
                     tracing::error!(origin = %origin_id, "background origin sync failed: {error}");
                 }
             }
@@ -490,6 +241,9 @@ mod tests {
             sync::{MirrorSyncService, RemoteObject, RemoteObjectSummary, RemoteStorage},
         },
         services::edge_config_store::{EdgeConfigStore, EdgeConfigStoreError},
+        services::origin_refresh::{
+            load_edge_configs, refresh_origin_snapshot, sync_origin_and_refresh_edge_config,
+        },
     };
 
     #[tokio::test]
@@ -553,6 +307,62 @@ missing:
     }
 
     #[tokio::test]
+    async fn sync_origin_prefers_dot_rendermesh_edge_config_over_legacy_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join("origins");
+        let mirror = LocalMirrorRepository::new(&root);
+        let syncer = MirrorSyncService::new(&root);
+        let store = EdgeConfigStore::from_configs(BTreeMap::new());
+        let storage = StaticStorage::new(BTreeMap::from([
+            (
+                "_rendermesh/edge.yaml".to_string(),
+                edge_object(
+                    r#"
+version: 1
+edge:
+  root_object: /legacy.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /legacy.html
+"#,
+                ),
+            ),
+            (
+                ".rendermesh/edge.yaml".to_string(),
+                yaml_edge_object(
+                    ".rendermesh/edge.yaml",
+                    r#"
+version: 1
+edge:
+  root_object: /dot.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /dot.html
+"#,
+                ),
+            ),
+        ]));
+
+        let template_store = TemplateStore::default();
+        sync_origin_and_refresh_edge_config(
+            "web",
+            &syncer,
+            &storage,
+            None,
+            &mirror,
+            &store,
+            &template_store,
+        )
+        .await
+        .expect("sync succeeds");
+
+        let config = store.get("web").expect("config refreshed");
+        assert_eq!(config.edge.root_object, "/dot.html");
+    }
+
+    #[tokio::test]
     async fn sync_origin_refreshes_edge_config_store_from_json_object() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().join("origins");
@@ -596,6 +406,35 @@ missing:
         let config = store.get("web").expect("json config refreshed");
         assert_eq!(config.edge.root_object, "/json-sync.html");
         assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_reads_dot_rendermesh_json_when_yaml_is_missing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            ".rendermesh/edge.json",
+            r#"
+{
+  "version": 1,
+  "edge": {
+    "root_object": "/dot-json.html",
+    "auto_rewrite_index": false
+  },
+  "missing": {
+    "action": "not_found",
+    "page": "/dot-json.html"
+  }
+}
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("json config loaded");
+        assert_eq!(config.edge.root_object, "/dot-json.html");
     }
 
     #[tokio::test]
@@ -696,6 +535,45 @@ missing:
         let config = store.get("web").expect("config loaded");
         assert_eq!(config.edge.root_object, "/yaml.html");
         assert!(!config.edge.auto_rewrite_index);
+    }
+
+    #[tokio::test]
+    async fn load_edge_configs_prefers_dot_rendermesh_yaml_over_legacy_yaml() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        write_mirror_file(
+            temp.path(),
+            "_rendermesh/edge.yaml",
+            r#"
+version: 1
+edge:
+  root_object: /legacy-yaml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /legacy-yaml.html
+"#,
+        )
+        .await;
+        write_mirror_file(
+            temp.path(),
+            ".rendermesh/edge.yaml",
+            r#"
+version: 1
+edge:
+  root_object: /dot-yaml.html
+  auto_rewrite_index: false
+missing:
+  action: not_found
+  page: /dot-yaml.html
+"#,
+        )
+        .await;
+
+        let store = load_edge_configs(["web".to_string()], &mirror).await;
+
+        let config = store.get("web").expect("config loaded");
+        assert_eq!(config.edge.root_object, "/dot-yaml.html");
     }
 
     #[tokio::test]
@@ -859,14 +737,14 @@ missing:
         let config_dir = temp.path().join("config");
         let source_dir = config_dir.join("site");
         let mirror_dir = temp.path().join("var/origins");
-        tokio::fs::create_dir_all(source_dir.join("_rendermesh"))
+        tokio::fs::create_dir_all(source_dir.join(".rendermesh"))
             .await
             .expect("create source dir");
         tokio::fs::write(source_dir.join("index.html"), "<h1>{{title}}</h1>")
             .await
             .expect("write index");
         tokio::fs::write(
-            source_dir.join("_rendermesh/edge.yaml"),
+            source_dir.join(".rendermesh/edge.yaml"),
             r#"
 version: 1
 edge:
@@ -1140,15 +1018,19 @@ hosts:
         tokio::fs::write(path, body).await.expect("write file");
     }
 
-    fn edge_object(body: &str) -> RemoteObject {
+    fn yaml_edge_object(key: &str, body: &str) -> RemoteObject {
         RemoteObject {
-            key: "_rendermesh/edge.yaml".to_string(),
+            key: key.to_string(),
             body: Bytes::from(body.to_string()),
             etag: Some("edge".to_string()),
             last_modified: None,
             content_type: Some("application/yaml".to_string()),
             cache_control: None,
         }
+    }
+
+    fn edge_object(body: &str) -> RemoteObject {
+        yaml_edge_object("_rendermesh/edge.yaml", body)
     }
 
     fn json_edge_object(key: &str, body: &str) -> RemoteObject {

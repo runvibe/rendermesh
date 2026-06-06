@@ -19,7 +19,7 @@ Create these modules:
 - `src/dto/render.rs`: internal request/response structs shared between route and service.
 - `src/services/manifest.rs`: manifest validation, env resolution, host normalization, exact/wildcard routing table.
 - `src/services/cors.rs`: CORS policy derived from host mappings.
-- `src/services/edge_config.rs`: default edge config and parsing/validation for `/_rendermesh/edge.yaml`.
+- `src/services/edge_config.rs`: default edge config and parsing/validation for `/.rendermesh/edge.yaml`.
 - `src/services/static_rules.rs`: redirects, rewrites, root object, auto index, and missing behavior.
 - `src/services/edge_hooks.rs`: ordered edge hook chain semantics and Handlebars decision rules.
 - `src/services/render_gateway.rs`: top-level request orchestration for `GET`, `HEAD`, `OPTIONS`, and `405`.
@@ -2598,13 +2598,13 @@ async fn load_edge_configs(
 
     let mut configs = BTreeMap::new();
     for origin_id in manifest.origins.keys() {
-        let config = match mirror.read_object(origin_id, "/_rendermesh/edge.yaml").await? {
+        let config = match mirror.read_object(origin_id, "/.rendermesh/edge.yaml").await? {
             Some(object) => {
                 let content = String::from_utf8(object.body.to_vec())?;
                 parse_edge_config_yaml(&content)?
             }
             None => {
-                tracing::warn!(origin = origin_id, "origin has no /_rendermesh/edge.yaml; using defaults");
+                tracing::warn!(origin = origin_id, "origin has no /.rendermesh/edge.yaml; using defaults");
                 default_edge_config()
             }
         };
@@ -2717,7 +2717,7 @@ hosts:
     origin: web
 ```
 
-Each origin may include `/_rendermesh/edge.yaml` in the bucket. If it is missing, RenderMesh uses:
+Each origin may include `/.rendermesh/edge.yaml` in the bucket. If it is missing, RenderMesh uses:
 
 ```yaml
 version: 1
