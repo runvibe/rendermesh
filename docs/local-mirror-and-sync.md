@@ -41,7 +41,7 @@ Objects are mirrored under:
 
 RenderMesh also writes metadata sidecars under `.rendermesh-meta/`.
 
-Mirrored objects under `/.rendermesh` are internal control files. They remain available to the sync pipeline, but are blocked from public rendering and edge-selected `file_path` responses.
+Mirrored objects under `/.rendermesh` are internal control files. They remain available to the sync pipeline and are blocked from public rendering. Edge hook `file_path` responses can explicitly select any file from the local mirror, including files under `/.rendermesh`.
 
 ## Background Sync
 

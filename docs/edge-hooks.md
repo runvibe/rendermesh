@@ -15,6 +15,11 @@ RenderMesh sends a `POST` request with JSON:
   },
   "request": {
     "url": "https://myapp.com/path?query=1",
+    "path": "/path",
+    "querystring": "query=1",
+    "queryparams": {
+      "query": "1"
+    },
     "method": "GET",
     "headers": {
       "host": "myapp.com"
@@ -33,6 +38,9 @@ RenderMesh sends a `POST` request with JSON:
 ## `request`
 
 - `url`: Full request URL reconstructed by RenderMesh.
+- `path`: Request path exactly as received by RenderMesh.
+- `querystring`: Raw query string without the leading `?`; empty string when no query was sent.
+- `queryparams`: Query string parsed as an object with percent-decoded string keys and values. If a key appears more than once, the last value wins.
 - `method`: Original method. The MVP serves `GET`, `HEAD`, and `OPTIONS`.
 - `headers`: Original request headers normalized to lowercase when they can be represented as UTF-8.
 - `body`: Currently always an empty string in the MVP.
@@ -86,7 +94,9 @@ RenderMesh resolves the current target file and renders it as a Handlebars templ
 }
 ```
 
-RenderMesh serves the selected file from the local mirror.
+RenderMesh serves the selected file from the local mirror. Edge-selected `file_path` can point to any mirrored origin file, including internal files under `/.rendermesh`. Direct public requests to `/.rendermesh/*` remain blocked.
+
+If the selected file does not exist, RenderMesh executes the origin's configured `missing` behavior.
 
 ### Serve And Render A Specific File
 

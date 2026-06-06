@@ -7,7 +7,7 @@ use crate::services::manifest::{parse_manifest_yaml, HostResolver, ResolvedHost}
 use crate::services::template_store::TemplateStore;
 use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use wiremock::{
-    matchers::{method, path},
+    matchers::{body_json, method, path},
     Mock, MockServer, ResponseTemplate,
 };
 
@@ -347,8 +347,85 @@ async fn edge_hook_request_body_is_empty_for_mvp() {
     assert_eq!(edge_request.context.bucket, "web-bucket");
     assert_eq!(edge_request.context.ip.as_deref(), Some("203.0.113.10"));
     assert_eq!(edge_request.request.url, "https://web.test/");
+    assert_eq!(edge_request.request.path, "/");
+    assert_eq!(edge_request.request.querystring, "");
+    assert!(edge_request.request.queryparams.is_empty());
     assert_eq!(edge_request.request.method, "GET");
     assert_eq!(edge_request.request.body, "");
+}
+
+#[tokio::test]
+async fn edge_hook_request_includes_path_querystring_and_queryparams() {
+    let request = RenderRequest {
+        query: Some("term=hello%20world&empty=&term=last&encoded=%2Fdocs".to_string()),
+        ..test_request(Method::GET, "/search")
+    };
+    let resolved = ResolvedHost {
+        normalized_host: "web.test".to_string(),
+        matched_host: "web.test".to_string(),
+        origin_id: "web".to_string(),
+    };
+
+    let edge_request = edge_hook_request(&request, &resolved, "web-bucket");
+
+    assert_eq!(
+        edge_request.request.url,
+        "https://web.test/search?term=hello%20world&empty=&term=last&encoded=%2Fdocs"
+    );
+    assert_eq!(edge_request.request.path, "/search");
+    assert_eq!(
+        edge_request.request.querystring,
+        "term=hello%20world&empty=&term=last&encoded=%2Fdocs"
+    );
+    assert_eq!(
+        edge_request.request.queryparams,
+        BTreeMap::from([
+            ("empty".to_string(), "".to_string()),
+            ("encoded".to_string(), "/docs".to_string()),
+            ("term".to_string(), "last".to_string()),
+        ])
+    );
+}
+
+#[tokio::test]
+async fn edge_http_payload_includes_path_querystring_and_queryparams() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/edge"))
+        .and(body_json(serde_json::json!({
+            "context": {
+                "bucket": "web",
+                "ip": null,
+                "origin": "web"
+            },
+            "request": {
+                "url": "https://web.test/search?term=hello%20world&page=2",
+                "path": "/search",
+                "querystring": "term=hello%20world&page=2",
+                "queryparams": {
+                    "page": "2",
+                    "term": "hello world"
+                },
+                "method": "GET",
+                "headers": {},
+                "body": ""
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(temp.path(), "search", "ok", None).await;
+    let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
+    let response = service
+        .handle(RenderRequest {
+            query: Some("term=hello%20world&page=2".to_string()),
+            ..test_request(Method::GET, "/search")
+        })
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::OK);
 }
 
 #[tokio::test]
@@ -378,7 +455,7 @@ async fn edge_file_path_outcome_serves_specified_file_with_edge_status() {
 }
 
 #[tokio::test]
-async fn edge_file_path_cannot_serve_reserved_rendermesh_object() {
+async fn edge_file_path_can_serve_reserved_rendermesh_object() {
     let server = edge_server(
         200,
         serde_json::json!({
@@ -395,12 +472,12 @@ async fn edge_file_path_cannot_serve_reserved_rendermesh_object() {
         .await
         .expect("response");
 
-    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-    assert!(response.body.is_empty());
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, bytes::Bytes::from_static(b"version: 1\n"));
 }
 
 #[tokio::test]
-async fn edge_file_path_cannot_serve_reserved_dot_rendermesh_object() {
+async fn edge_file_path_can_serve_reserved_dot_rendermesh_object() {
     let server = edge_server(
         200,
         serde_json::json!({
@@ -417,8 +494,35 @@ async fn edge_file_path_cannot_serve_reserved_dot_rendermesh_object() {
         .await
         .expect("response");
 
-    assert_eq!(response.status, StatusCode::BAD_GATEWAY);
-    assert!(response.body.is_empty());
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(response.body, bytes::Bytes::from_static(b"version: 1\n"));
+}
+
+#[tokio::test]
+async fn missing_edge_file_path_uses_configured_missing_behavior() {
+    let server = edge_server(
+        203,
+        serde_json::json!({
+            "file_path": "/missing-from-edge.html",
+            "headers": {"x-edge": "file"}
+        }),
+    )
+    .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(temp.path(), "index.html", "<h1>Fallback</h1>", None).await;
+    let service = test_gateway_with_edge_url(temp.path().join("origins"), &server.uri());
+
+    let response = service
+        .handle(test_request(Method::GET, "/from-edge"))
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"<h1>Fallback</h1>")
+    );
+    assert_header(&response, "x-edge", "file");
 }
 
 #[tokio::test]

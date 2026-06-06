@@ -38,6 +38,12 @@ pub struct RenderGatewayService {
 
 type EdgeChainResult = (Option<RenderResponse>, BTreeMap<String, String>);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObjectReadAccess {
+    Public,
+    Internal,
+}
+
 impl RenderGatewayService {
     pub fn new(
         resolver: HostResolver,
@@ -393,18 +399,23 @@ impl RenderGatewayService {
                     } => {
                         edge_span.record("outcome", "serve_file");
                         let Some(response) = self
-                            .serve_static_path(
+                            .serve_static_path_with_options(
                                 &resolved.origin_id,
                                 config,
                                 &file_path,
                                 status,
                                 params.as_ref(),
                                 cors_headers,
+                                ObjectReadAccess::Internal,
                             )
                             .await?
                         else {
-                            let mut response = RenderResponse::empty(StatusCode::BAD_GATEWAY);
-                            apply_headers(&mut response.headers, cors_headers.clone());
+                            let response_headers =
+                                combined_response_headers(&filtered_headers(&state.headers), cors_headers);
+                            let response = self
+                                .handle_missing(&resolved.origin_id, config, &response_headers)
+                                .await?
+                                .unwrap_or_else(|| not_found_text(response_headers));
                             tracing::Span::current().record("terminal", true);
                             tracing::Span::current().record("duration_ms", elapsed_ms(start));
                             return Ok(terminal_edge_response(
@@ -487,6 +498,28 @@ impl RenderGatewayService {
         params: Option<&serde_json::Value>,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<Option<RenderResponse>> {
+        self.serve_static_path_with_options(
+            origin_id,
+            config,
+            path,
+            status,
+            params,
+            cors_headers,
+            ObjectReadAccess::Public,
+        )
+        .await
+    }
+
+    async fn serve_static_path_with_options(
+        &self,
+        origin_id: &str,
+        config: &EdgeConfig,
+        path: &str,
+        status: StatusCode,
+        params: Option<&serde_json::Value>,
+        cors_headers: &BTreeMap<String, String>,
+        access: ObjectReadAccess,
+    ) -> Result<Option<RenderResponse>> {
         let start = Instant::now();
         let span = tracing::info_span!(
             "rendermesh.static",
@@ -500,7 +533,7 @@ impl RenderGatewayService {
         );
         async move {
             if let Some(response) = self
-                .serve_object(origin_id, path, status, params, cors_headers)
+                .serve_object_with_options(origin_id, path, status, params, cors_headers, access)
                 .await?
             {
                 tracing::Span::current().record("hit", true);
@@ -511,7 +544,14 @@ impl RenderGatewayService {
             if config.edge.auto_rewrite_index {
                 let candidate = auto_index_candidate(path);
                 let response = self
-                    .serve_object(origin_id, &candidate, status, params, cors_headers)
+                    .serve_object_with_options(
+                        origin_id,
+                        &candidate,
+                        status,
+                        params,
+                        cors_headers,
+                        access,
+                    )
                     .await?;
                 tracing::Span::current().record("hit", response.is_some());
                 tracing::Span::current().record("auto_index", true);
@@ -535,6 +575,26 @@ impl RenderGatewayService {
         params: Option<&serde_json::Value>,
         cors_headers: &BTreeMap<String, String>,
     ) -> Result<Option<RenderResponse>> {
+        self.serve_object_with_options(
+            origin_id,
+            path,
+            status,
+            params,
+            cors_headers,
+            ObjectReadAccess::Public,
+        )
+        .await
+    }
+
+    async fn serve_object_with_options(
+        &self,
+        origin_id: &str,
+        path: &str,
+        status: StatusCode,
+        params: Option<&serde_json::Value>,
+        cors_headers: &BTreeMap<String, String>,
+        access: ObjectReadAccess,
+    ) -> Result<Option<RenderResponse>> {
         let start = Instant::now();
         let span = tracing::info_span!(
             "rendermesh.object",
@@ -546,7 +606,7 @@ impl RenderGatewayService {
             duration_ms = tracing::field::Empty
         );
         async move {
-            let Some(object) = self.safe_read_object(origin_id, path).await? else {
+            let Some(object) = self.read_object(origin_id, path, access).await? else {
                 tracing::Span::current().record("hit", false);
                 tracing::Span::current().record("duration_ms", elapsed_ms(start));
                 return Ok(None);
@@ -605,8 +665,13 @@ impl RenderGatewayService {
         .await
     }
 
-    async fn safe_read_object(&self, origin_id: &str, path: &str) -> Result<Option<LocalObject>> {
-        if is_reserved_rendermesh_path(path) {
+    async fn read_object(
+        &self,
+        origin_id: &str,
+        path: &str,
+        access: ObjectReadAccess,
+    ) -> Result<Option<LocalObject>> {
+        if access == ObjectReadAccess::Public && is_reserved_rendermesh_path(path) {
             tracing::warn!(origin = %origin_id, path = %path, "reserved RenderMesh object path denied");
             return Ok(None);
         }
@@ -731,6 +796,9 @@ fn edge_hook_request(
         },
         request: EdgeHookHttpRequest {
             url: full_request_url(request),
+            path: request.path.clone(),
+            querystring: request.query.clone().unwrap_or_default(),
+            queryparams: query_params_map(request.query.as_deref()),
             method: request.method.as_str().to_string(),
             headers: request_headers_map(request),
             body: String::new(),
@@ -761,6 +829,12 @@ fn request_headers_map(request: &RenderRequest) -> BTreeMap<String, String> {
                 .ok()
                 .map(|value| (name.as_str().to_ascii_lowercase(), value.to_string()))
         })
+        .collect()
+}
+
+fn query_params_map(query: Option<&str>) -> BTreeMap<String, String> {
+    url::form_urlencoded::parse(query.unwrap_or_default().as_bytes())
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect()
 }
 

@@ -159,7 +159,7 @@ missing:
 
 If no edge config file exists, RenderMesh uses safe defaults. Invalid edge config marks only that origin as unavailable until a valid config is synced.
 
-The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync, but never serves objects under this namespace through public render requests or through an edge-selected `file_path`.
+The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync and never serves objects under this namespace through public render requests. Edge hooks can still select any local mirror object with `file_path`, including files under `/.rendermesh`.
 
 ## Manual Origin Sync
 
@@ -192,6 +192,11 @@ When an origin defines edge hooks, RenderMesh sends a `POST` request to the conf
   },
   "request": {
     "url": "https://myapp.com/path?query=1",
+    "path": "/path",
+    "querystring": "query=1",
+    "queryparams": {
+      "query": "1"
+    },
     "method": "GET",
     "headers": {},
     "body": ""
