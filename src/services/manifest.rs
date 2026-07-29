@@ -5,6 +5,7 @@ use anyhow::{anyhow, Result};
 use crate::{
     dto::manifest::{CdnConfig, DomainReconcileMode, OriginConfig, RenderMeshManifest},
     repositories::manifest::ManifestRepository,
+    repositories::sync::normalize_remote_key,
     services::config_format::parse_config,
 };
 
@@ -175,6 +176,11 @@ pub fn validate_manifest(manifest: &RenderMeshManifest) -> Result<()> {
                 "origin {origin_id} sync_interval_seconds must be positive"
             ));
         }
+        if let Some(path) = origin.activation_barrier_path() {
+            normalize_remote_key(path).map_err(|error| {
+                anyhow!("origin {origin_id} activation_barrier_path is invalid: {error}")
+            })?;
+        }
     }
 
     for (host, host_config) in &manifest.hosts {
@@ -291,6 +297,7 @@ origins:
     secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
+    activation_barrier_path: .rendermesh/edge.yaml
 hosts:
   myapp.com:
     origin: my_app
@@ -310,6 +317,10 @@ hosts:
             OriginConfig::S3(origin) => {
                 assert_eq!(origin.bucket, "bucket_my_app_123");
                 assert_eq!(origin.sync_interval_seconds, Some(30));
+                assert_eq!(
+                    origin.activation_barrier_path.as_deref(),
+                    Some(".rendermesh/edge.yaml")
+                );
             }
             other => panic!("expected s3 origin, got {other:?}"),
         }

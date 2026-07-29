@@ -66,6 +66,7 @@ pub struct OriginRefreshService {
     freshness_indexes: OriginFreshnessIndexes,
     origin_runtime: OriginRuntimeStore,
     storage_by_origin: Arc<BTreeMap<String, OriginStorageRepository>>,
+    activation_barrier_by_origin: Arc<BTreeMap<String, String>>,
     cdn_by_origin: Arc<BTreeMap<String, OriginCdnRefresh>>,
     locks: OriginRefreshLocks,
 }
@@ -138,6 +139,7 @@ impl OriginRefreshService {
         freshness_indexes: OriginFreshnessIndexes,
         origin_runtime: OriginRuntimeStore,
         storage_by_origin: BTreeMap<String, OriginStorageRepository>,
+        activation_barrier_by_origin: BTreeMap<String, String>,
         cdn_by_origin: BTreeMap<String, OriginCdnRefresh>,
     ) -> Self {
         Self {
@@ -147,6 +149,7 @@ impl OriginRefreshService {
             freshness_indexes,
             origin_runtime,
             storage_by_origin: Arc::new(storage_by_origin),
+            activation_barrier_by_origin: Arc::new(activation_barrier_by_origin),
             cdn_by_origin: Arc::new(cdn_by_origin),
             locks: OriginRefreshLocks::default(),
         }
@@ -205,6 +208,9 @@ impl OriginRefreshService {
                 &self.template_store,
                 &self.freshness_indexes,
                 &self.origin_runtime,
+                self.activation_barrier_by_origin
+                    .get(origin_id)
+                    .map(String::as_str),
             )
             .await
             .map_err(OriginRefreshError::Failed)?;
@@ -244,6 +250,7 @@ pub(crate) async fn refresh_origin_snapshot<S>(
     template_store: &TemplateStore,
     freshness_indexes: &OriginFreshnessIndexes,
     origin_runtime: &OriginRuntimeStore,
+    activation_barrier_path: Option<&str>,
 ) -> Result<OriginSyncResponse>
 where
     S: RemoteStorage,
@@ -256,6 +263,13 @@ where
     let staged = syncer
         .stage_origin_sync(origin_id, storage, previous_index.as_ref())
         .await?;
+    validate_activation_barrier(
+        origin_id,
+        previous_index.as_ref(),
+        &staged.index,
+        &staged.diff,
+        activation_barrier_path,
+    )?;
     let (stage_mirror, stage_origin_id) = staged_origin_mirror(&staged.staging_dir)?;
     let edge_config = load_origin_edge_config(&stage_origin_id, &stage_mirror).await?;
     let template_registry = template_store
@@ -390,6 +404,112 @@ where
     })
 }
 
+fn validate_activation_barrier(
+    origin_id: &str,
+    previous_index: Option<&OriginFreshnessIndex>,
+    next_index: &OriginFreshnessIndex,
+    diff: &crate::services::freshness::OriginFreshnessDiff,
+    activation_barrier_path: Option<&str>,
+) -> Result<()> {
+    let Some(path) = activation_barrier_path else {
+        return Ok(());
+    };
+    let has_changes =
+        !diff.added.is_empty() || !diff.modified.is_empty() || !diff.removed.is_empty();
+    if !has_changes {
+        return Ok(());
+    }
+
+    let previous_has_barrier = previous_index.is_some_and(|index| index.files.contains_key(path));
+    let next_has_barrier = next_index.files.contains_key(path);
+    let barrier_changed = diff.added.contains(path) || diff.modified.contains(path);
+
+    if !next_has_barrier {
+        return Err(anyhow::anyhow!(
+            "origin {origin_id} activation barrier {path} is missing"
+        ));
+    }
+    if previous_has_barrier && !barrier_changed {
+        return Err(anyhow::anyhow!(
+            "origin {origin_id} activation barrier {path} did not change with the deployment"
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod activation_barrier_tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::validate_activation_barrier;
+    use crate::{
+        repositories::sync::RemoteObjectSummary,
+        services::freshness::{build_origin_index, diff_origin_indexes},
+    };
+
+    const BARRIER: &str = ".rendermesh/edge.yaml";
+
+    #[test]
+    fn rejects_content_changes_when_existing_barrier_did_not_change() {
+        let previous = index("edge-v1", "index-v1");
+        let next = index("edge-v1", "index-v2");
+        let diff = diff_origin_indexes(Some(&previous), &next);
+
+        let error =
+            validate_activation_barrier("web", Some(&previous), &next, &diff, Some(BARRIER))
+                .expect_err("unchanged barrier must block activation");
+
+        assert!(error.to_string().contains("did not change"));
+    }
+
+    #[test]
+    fn accepts_content_changes_with_a_new_valid_barrier_generation() {
+        let previous = index("edge-v1", "index-v1");
+        let next = index("edge-v2", "index-v2");
+        let diff = diff_origin_indexes(Some(&previous), &next);
+
+        validate_activation_barrier("web", Some(&previous), &next, &diff, Some(BARRIER))
+            .expect("changed barrier allows activation");
+    }
+
+    #[test]
+    fn accepts_the_first_generation_when_it_contains_the_barrier() {
+        let next = index("edge-v1", "index-v1");
+        let diff = diff_origin_indexes(None, &next);
+
+        validate_activation_barrier("web", None, &next, &diff, Some(BARRIER))
+            .expect("first complete generation allows activation");
+    }
+
+    fn index(
+        edge_etag: &str,
+        index_etag: &str,
+    ) -> crate::services::freshness::OriginFreshnessIndex {
+        build_origin_index(
+            "web",
+            vec![
+                summary(BARRIER, edge_etag),
+                summary("index.html", index_etag),
+            ],
+            Utc.with_ymd_and_hms(2026, 7, 29, 12, 0, 0).unwrap(),
+        )
+        .expect("index")
+    }
+
+    fn summary(key: &str, etag: &str) -> RemoteObjectSummary {
+        RemoteObjectSummary {
+            key: key.to_string(),
+            created_at: None,
+            etag: Some(etag.to_string()),
+            last_modified: None,
+            size: 1,
+            content_type: None,
+            cache_control: None,
+        }
+    }
+}
+
 fn staged_origin_mirror(staging_dir: &Path) -> Result<(LocalMirrorRepository, String)> {
     let root = staging_dir
         .parent()
@@ -471,6 +591,7 @@ where
         template_store,
         &freshness_indexes,
         &origin_runtime,
+        None,
     )
     .await?;
     Ok(())

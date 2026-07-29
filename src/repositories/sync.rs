@@ -167,6 +167,11 @@ where
 
     for key in diff.changed_paths() {
         let object = storage.get_object(key).await?;
+        let summary = index
+            .files
+            .get(key)
+            .ok_or_else(|| anyhow!("listed object {key} is missing from the freshness index"))?;
+        validate_downloaded_object(key, summary, &object)?;
         write_object(origin_dir, object).await?;
         downloaded += 1;
     }
@@ -175,6 +180,35 @@ where
     remove_orphan_metadata_sidecars(origin_dir, &remote_keys).await?;
 
     Ok((index, diff, SyncReport { downloaded }))
+}
+
+fn validate_downloaded_object(
+    key: &str,
+    summary: &crate::services::freshness::OriginFileState,
+    object: &RemoteObject,
+) -> Result<()> {
+    let downloaded_key = normalize_remote_key(&object.key)?;
+    if downloaded_key != key {
+        return Err(anyhow!(
+            "downloaded object key {downloaded_key} does not match listed key {key}"
+        ));
+    }
+    if object.body.len() as u64 != summary.size {
+        return Err(anyhow!(
+            "downloaded object {key} changed size after it was listed"
+        ));
+    }
+    if summary.etag.is_some() && object.etag != summary.etag {
+        return Err(anyhow!(
+            "downloaded object {key} changed etag after it was listed"
+        ));
+    }
+    if summary.last_modified.is_some() && object.last_modified != summary.last_modified {
+        return Err(anyhow!(
+            "downloaded object {key} changed last-modified after it was listed"
+        ));
+    }
+    Ok(())
 }
 
 async fn sync_origin_dir<S>(origin_dir: &Path, storage: &S) -> Result<SyncReport>
@@ -593,6 +627,33 @@ mod tests {
         let mut keys = storage.requested_keys.lock().await.clone();
         keys.sort();
         keys
+    }
+
+    #[test]
+    fn rejects_an_object_that_changed_after_the_remote_listing() {
+        let summary = crate::services::freshness::OriginFileState {
+            path: ".rendermesh/edge.yaml".to_string(),
+            created_at: None,
+            last_modified: None,
+            captured_at: chrono::Utc::now(),
+            size: 10,
+            etag: Some("edge-invalid".to_string()),
+            content_type: Some("application/yaml".to_string()),
+            cache_control: None,
+        };
+        let downloaded = RemoteObject {
+            key: ".rendermesh/edge.yaml".to_string(),
+            body: Bytes::from_static(b"version: 1"),
+            etag: Some("edge-ready".to_string()),
+            last_modified: None,
+            content_type: Some("application/yaml".to_string()),
+            cache_control: None,
+        };
+
+        let error = validate_downloaded_object(".rendermesh/edge.yaml", &summary, &downloaded)
+            .expect_err("listing/download race must be rejected");
+
+        assert!(error.to_string().contains("changed etag"));
     }
 
     #[tokio::test]

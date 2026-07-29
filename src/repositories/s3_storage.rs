@@ -120,6 +120,7 @@ mod tests {
             secret_access_key_env: Some("TEST_S3_SECRET_ACCESS_KEY".to_string()),
             force_path_style_env: Some("TEST_S3_FORCE_PATH_STYLE".to_string()),
             sync_interval_seconds: None,
+            activation_barrier_path: None,
             cdn: None,
         };
 
@@ -141,6 +142,7 @@ mod tests {
             secret_access_key_env: None,
             force_path_style_env: None,
             sync_interval_seconds: None,
+            activation_barrier_path: None,
             cdn: None,
         };
 
