@@ -105,6 +105,7 @@ origins:
     region_env: MY_APP_STORAGE_REGION
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
+    activation_barrier_path: .rendermesh/edge.yaml
     cdn:
       provider: cloudfront
       distribution_id_env: MY_APP_CLOUDFRONT_DISTRIBUTION_ID
@@ -124,6 +125,14 @@ hosts:
 Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
 
 For AWS environments, omit `access_key_id_env` and `secret_access_key_env` to use the AWS SDK default credential chain, including EKS IRSA. For S3-compatible local labs or providers that require static credentials, configure both fields.
+
+`activation_barrier_path` is optional. When configured, RenderMesh requires that
+object to change in every non-empty origin update after the first activation.
+This lets publishers upload an intentionally invalid barrier first, synchronize
+the remaining objects, and upload a valid barrier with a unique deployment
+identifier last. RenderMesh also verifies downloaded object identity against the
+remote listing, so a publication that overlaps a refresh is rejected instead of
+activating a mixed generation.
 
 Local origins use a host filesystem path instead of bucket credentials:
 

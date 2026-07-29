@@ -44,6 +44,13 @@ impl OriginConfig {
             Self::Local(origin) => origin.cdn.as_ref(),
         }
     }
+
+    pub fn activation_barrier_path(&self) -> Option<&str> {
+        match self {
+            Self::S3(origin) => origin.activation_barrier_path.as_deref(),
+            Self::Local(origin) => origin.activation_barrier_path.as_deref(),
+        }
+    }
 }
 
 impl CdnConfig {
@@ -65,6 +72,7 @@ pub struct S3OriginConfig {
     pub secret_access_key_env: Option<String>,
     pub force_path_style_env: Option<String>,
     pub sync_interval_seconds: Option<u64>,
+    pub activation_barrier_path: Option<String>,
     pub cdn: Option<CdnConfig>,
 }
 
@@ -73,6 +81,7 @@ pub struct S3OriginConfig {
 pub struct LocalOriginConfig {
     pub path: String,
     pub sync_interval_seconds: Option<u64>,
+    pub activation_barrier_path: Option<String>,
     pub cdn: Option<CdnConfig>,
 }
 

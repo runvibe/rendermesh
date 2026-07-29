@@ -61,9 +61,13 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
     let cdn_domains_by_origin = build_origin_cdn_domains(&manifest).await?;
 
     let mut storage_by_origin = BTreeMap::new();
+    let mut activation_barrier_by_origin = BTreeMap::new();
     for (origin_id, origin) in &manifest.origins {
         let storage = OriginStorageRepository::from_origin_config(origin, manifest_dir).await?;
         storage_by_origin.insert(origin_id.clone(), storage);
+        if let Some(path) = origin.activation_barrier_path() {
+            activation_barrier_by_origin.insert(origin_id.clone(), path.to_string());
+        }
     }
 
     let origin_refresh = OriginRefreshService::new(
@@ -73,6 +77,7 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         freshness_indexes,
         origin_runtime.clone(),
         storage_by_origin,
+        activation_barrier_by_origin,
         cdn_by_origin,
     );
 
@@ -719,6 +724,7 @@ missing:
             &template_store,
             &freshness_indexes,
             &origin_runtime,
+            None,
         )
         .await
         .expect("refresh succeeds");
@@ -794,6 +800,81 @@ hosts:
                 .await
                 .expect("mirror index exists"),
             "<h1>{{title}}</h1>"
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_barrier_keeps_the_previous_mirror_when_content_changes_alone() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config_dir = temp.path().join("config");
+        let source_dir = config_dir.join("site");
+        let mirror_dir = temp.path().join("var/origins");
+        tokio::fs::create_dir_all(source_dir.join(".rendermesh"))
+            .await
+            .expect("create source dir");
+        tokio::fs::write(source_dir.join("index.html"), "<h1>stable</h1>")
+            .await
+            .expect("write index");
+        tokio::fs::write(
+            source_dir.join(".rendermesh/edge.yaml"),
+            "version: 1\nedge:\n  root_object: /index.html\nmissing:\n  action: not_found\n",
+        )
+        .await
+        .expect("write barrier");
+        let manifest_path = config_dir.join("rendermesh.yaml");
+        tokio::fs::write(
+            &manifest_path,
+            format!(
+                r#"
+version: 1
+runtime:
+  local_store_dir: {}
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: local
+    path: ./site
+    activation_barrier_path: .rendermesh/edge.yaml
+hosts:
+  web.test:
+    origin: web
+"#,
+                mirror_dir.display()
+            ),
+        )
+        .await
+        .expect("write manifest");
+        let runtime = build_render_runtime(manifest_path.to_str().expect("manifest path"))
+            .await
+            .expect("runtime builds");
+
+        tokio::fs::write(source_dir.join("index.html"), "<h1>partial</h1>")
+            .await
+            .expect("mutate index without barrier");
+
+        let error = runtime
+            .origin_refresh
+            .refresh_origin("web", OriginRefreshTrigger::Manual)
+            .await
+            .expect_err("unchanged barrier blocks activation");
+
+        assert!(error.to_string().contains("did not change"));
+        assert_eq!(
+            tokio::fs::read_to_string(mirror_dir.join("web/index.html"))
+                .await
+                .expect("active mirror"),
+            "<h1>stable</h1>"
+        );
+        let mut staged_entries = tokio::fs::read_dir(mirror_dir.join(".rendermesh-sync"))
+            .await
+            .expect("read staging root");
+        assert!(
+            staged_entries
+                .next_entry()
+                .await
+                .expect("read staging entry")
+                .is_none(),
+            "rejected activation must remove its staged mirror"
         );
     }
 
