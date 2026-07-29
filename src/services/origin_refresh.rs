@@ -263,23 +263,38 @@ where
     let staged = syncer
         .stage_origin_sync(origin_id, storage, previous_index.as_ref())
         .await?;
-    validate_activation_barrier(
-        origin_id,
-        previous_index.as_ref(),
-        &staged.index,
-        &staged.diff,
-        activation_barrier_path,
-    )?;
-    let (stage_mirror, stage_origin_id) = staged_origin_mirror(&staged.staging_dir)?;
-    let edge_config = load_origin_edge_config(&stage_origin_id, &stage_mirror).await?;
-    let template_registry = template_store
-        .compile_template_update_from_mirror(
+    let preparation = async {
+        validate_activation_barrier(
             origin_id,
-            &stage_origin_id,
-            &stage_mirror,
+            previous_index.as_ref(),
+            &staged.index,
             &staged.diff,
-        )
-        .await?;
+            activation_barrier_path,
+        )?;
+        let (stage_mirror, stage_origin_id) = staged_origin_mirror(&staged.staging_dir)?;
+        let edge_config = load_origin_edge_config(&stage_origin_id, &stage_mirror).await?;
+        let template_registry = template_store
+            .compile_template_update_from_mirror(
+                origin_id,
+                &stage_origin_id,
+                &stage_mirror,
+                &staged.diff,
+            )
+            .await?;
+        Ok::<_, anyhow::Error>((edge_config, template_registry))
+    }
+    .await;
+    let (edge_config, template_registry) = match preparation {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            if let Err(cleanup_error) = syncer.discard_staged_origin(staged).await {
+                return Err(error.context(format!(
+                    "failed to discard rejected staged origin: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
+    };
     let next_index = staged.index.clone();
     let diff = staged.diff.clone();
     let report = staged.report.clone();

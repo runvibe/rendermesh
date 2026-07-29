@@ -133,6 +133,10 @@ impl MirrorSyncService {
         Ok(())
     }
 
+    pub async fn discard_staged_origin(&self, staged: StagedOriginSync) -> Result<()> {
+        remove_dir_if_exists(&staged.staging_dir).await
+    }
+
     fn staging_dir(&self, origin_id: &str) -> Result<PathBuf> {
         LocalMirrorRepository::new(self.root.clone()).origin_dir(origin_id)?;
         let timestamp = SystemTime::now()

@@ -865,6 +865,17 @@ hosts:
                 .expect("active mirror"),
             "<h1>stable</h1>"
         );
+        let mut staged_entries = tokio::fs::read_dir(mirror_dir.join(".rendermesh-sync"))
+            .await
+            .expect("read staging root");
+        assert!(
+            staged_entries
+                .next_entry()
+                .await
+                .expect("read staging entry")
+                .is_none(),
+            "rejected activation must remove its staged mirror"
+        );
     }
 
     #[tokio::test]
