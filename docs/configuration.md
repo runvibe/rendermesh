@@ -144,7 +144,7 @@ origins:
         checkout_v2: true
 ```
 
-RenderMesh does not interpolate environment variables inside `edge_context`. Do not put credentials, API tokens, private keys, session tokens, or end-user personal data in this field.
+RenderMesh does not interpolate environment variables inside `edge_context`. Do not put credentials, API tokens, private keys, session tokens, or end-user personal data in this field. See [Edge Context](edge-context.md) for payload examples and edge API usage.
 
 ## `cdn`
 

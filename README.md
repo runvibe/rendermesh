@@ -32,7 +32,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Configuration](docs/configuration.md): global manifest, environment variables, S3 origins, local origins, hosts, and credentials.
 - [Origin Edge Config](docs/edge-config.md): `/.rendermesh/edge.yaml`, `edge.yml`, or `edge.json`, root object, auto-index, redirects, rewrites, and missing-file behavior.
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
-- [Edge Context Spec](docs/edge-context-spec.md): origin-level custom context sent to edge hooks.
+- [Edge Context](docs/edge-context.md): origin-level custom context sent to edge hooks.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
 - [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
@@ -178,6 +178,44 @@ If no edge config file exists, RenderMesh uses safe defaults. Invalid edge confi
 The `/.rendermesh` namespace is origin-internal. RenderMesh loads config files from it during sync and never serves objects under this namespace through public render requests. Edge hooks can still select any local mirror object with `file_path`, including files under `/.rendermesh`.
 
 Edge hook response fields use snake_case. A `file_path` value must start with `/`, for example `"/.rendermesh/config/data.json"`. If that selected file is missing from the local mirror, RenderMesh applies the origin's configured `missing` behavior.
+
+## Edge Context
+
+Origins can include non-secret `edge_context` metadata in the global manifest. RenderMesh sends it to every edge hook for the resolved origin as `context.edge_context`.
+
+```yaml
+origins:
+  my_app:
+    type: s3
+    bucket: bucket_my_app_123
+    endpoint_env: MY_APP_STORAGE_ENDPOINT
+    region_env: MY_APP_STORAGE_REGION
+    edge_context:
+      tenant_id: loja-123
+      locale: pt-BR
+      feature_flags:
+        checkout_v2: true
+```
+
+The edge receives:
+
+```json
+{
+  "context": {
+    "origin": "my_app",
+    "bucket": "bucket_my_app_123",
+    "edge_context": {
+      "tenant_id": "loja-123",
+      "locale": "pt-BR",
+      "feature_flags": {
+        "checkout_v2": true
+      }
+    }
+  }
+}
+```
+
+Use it for tenant/app metadata, themes, locales, deployment environment, and feature flags. Do not put secrets in `edge_context`. See [Edge Context](docs/edge-context.md) for full examples.
 
 ## Manual Origin Sync
 
