@@ -40,7 +40,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.
 - [Release](docs/release.md): GitHub Actions release workflow, multi-arch Docker image, and `Dockerfile.artifact`.
 - [Architecture](docs/architecture.md): code layers, module responsibilities, and request flow.
-- [Startup Refactor Spec](docs/startup-refactor-spec.md): proposed split of startup orchestration into smaller modules.
+- [Startup Refactor Spec](docs/startup-refactor-spec.md): split of startup orchestration into smaller modules.
 - [Local Example](examples/local/README.md): runnable MinIO + edge API lab using `test.com`.
 
 ## Quick Start

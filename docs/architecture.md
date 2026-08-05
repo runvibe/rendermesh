@@ -59,6 +59,7 @@ Important files:
 
 - `src/services/render_gateway.rs`
 - `src/services/startup.rs`
+- `src/services/startup/`
 - `src/services/manifest.rs`
 - `src/services/static_rules.rs`
 - `src/services/edge_hooks.rs`

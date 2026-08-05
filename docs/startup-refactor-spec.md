@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed.
+Implemented.
 
 ## Summary
 
@@ -192,12 +192,12 @@ pub fn spawn_background_sync(
 
 ## Test Migration Plan
 
-Move tests based on responsibility:
+Prefer moving tests based on responsibility:
 
 - Origin path and local origin startup tests -> `startup/origins.rs`.
 - CDN refresh/domain startup tests -> `startup/cdn.rs`.
 - Startup sync, edge config store, activation barrier, and template refresh tests -> `startup/initial_sync.rs`.
-- Facade-level runtime construction smoke tests can remain in `startup.rs` if needed.
+- Facade-level and cross-module runtime construction tests can remain in `startup.rs` when they validate the integrated startup flow.
 
 Keep test names stable where possible to reduce review noise.
 

@@ -1,39 +1,26 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 
+mod background;
+mod cdn;
+mod initial_sync;
+mod origins;
+
 use crate::{
-    dto::manifest::RenderMeshManifest,
     repositories::{
-        local_mirror::LocalMirrorRepository, manifest::ManifestRepository,
-        origin_storage::OriginStorageRepository, sync::MirrorSyncService,
+        local_mirror::LocalMirrorRepository, manifest::ManifestRepository, sync::MirrorSyncService,
     },
     services::{
-        cdn_domains::OriginCdnDomains,
-        cdn_refresh::OriginCdnRefresh,
         cors::CorsPolicy,
         edge_config_store::EdgeConfigStore,
         manifest::{load_manifest, HostResolver},
-        origin_refresh::{OriginFreshnessIndexes, OriginRefreshService, OriginRefreshTrigger},
+        origin_refresh::{OriginFreshnessIndexes, OriginRefreshService},
         origin_runtime::OriginRuntimeStore,
         render_gateway::RenderGatewayService,
         template_store::TemplateStore,
     },
 };
-
-fn origin_refresh_error_to_anyhow(
-    error: crate::services::origin_refresh::OriginRefreshError,
-) -> anyhow::Error {
-    match error {
-        crate::services::origin_refresh::OriginRefreshError::NotFound => {
-            anyhow::anyhow!("origin not found during startup sync")
-        }
-        crate::services::origin_refresh::OriginRefreshError::AlreadyRunning => {
-            anyhow::anyhow!("origin sync already running during startup")
-        }
-        crate::services::origin_refresh::OriginRefreshError::Failed(error) => error,
-    }
-}
 
 pub struct RenderRuntime {
     pub render_gateway: RenderGatewayService,
@@ -47,28 +34,14 @@ pub async fn build_render_gateway(manifest_path: &str) -> Result<RenderGatewaySe
 
 pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> {
     let manifest = load_manifest(&ManifestRepository::new(), manifest_path).await?;
-    let manifest_dir = Path::new(manifest_path)
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
     let mirror = LocalMirrorRepository::new(&manifest.runtime.local_store_dir);
     let syncer = MirrorSyncService::new(&manifest.runtime.local_store_dir);
     let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
     let template_store = TemplateStore::default();
     let freshness_indexes = OriginFreshnessIndexes::default();
     let origin_runtime = OriginRuntimeStore::default();
-    let cdn_by_origin = build_origin_cdns(&manifest).await?;
-    let cdn_domains_by_origin = build_origin_cdn_domains(&manifest).await?;
-
-    let mut storage_by_origin = BTreeMap::new();
-    let mut activation_barrier_by_origin = BTreeMap::new();
-    for (origin_id, origin) in &manifest.origins {
-        let storage = OriginStorageRepository::from_origin_config(origin, manifest_dir).await?;
-        storage_by_origin.insert(origin_id.clone(), storage);
-        if let Some(path) = origin.activation_barrier_path() {
-            activation_barrier_by_origin.insert(origin_id.clone(), path.to_string());
-        }
-    }
+    let startup_origins = origins::build_startup_origins(&manifest, manifest_path).await?;
+    let startup_cdn = cdn::build_startup_cdn(&manifest).await?;
 
     let origin_refresh = OriginRefreshService::new(
         syncer,
@@ -76,27 +49,20 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         template_store.clone(),
         freshness_indexes,
         origin_runtime.clone(),
-        storage_by_origin,
-        activation_barrier_by_origin,
-        cdn_by_origin,
+        startup_origins.storage_by_origin,
+        startup_origins.activation_barrier_by_origin,
+        startup_cdn.refresh_by_origin,
     );
 
-    for origin_id in manifest.origins.keys() {
-        let report = origin_refresh
-            .refresh_origin(origin_id, OriginRefreshTrigger::Startup)
-            .await
-            .map_err(origin_refresh_error_to_anyhow)?;
-        tracing::info!(
-            origin = %origin_id,
-            downloaded = report.downloaded_files,
-            "initial origin sync completed"
-        );
-        if let Some(cdn_domains) = cdn_domains_by_origin.get(origin_id) {
-            reconcile_origin_cdn_domains(origin_id, &manifest, cdn_domains, &origin_runtime).await;
-        }
-    }
+    initial_sync::sync_origins_at_startup(
+        &manifest,
+        &origin_refresh,
+        &startup_cdn.domains_by_origin,
+        &origin_runtime,
+    )
+    .await?;
 
-    spawn_background_sync(manifest.clone(), origin_refresh.clone());
+    background::spawn_background_sync(manifest.clone(), origin_refresh.clone());
 
     let render_gateway = RenderGatewayService::new_with_stores_origin_buckets_and_edge_contexts(
         HostResolver::new(&manifest)?,
@@ -104,8 +70,8 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         mirror,
         edge_configs,
         template_store,
-        origin_buckets(&manifest),
-        origin_edge_contexts(&manifest),
+        startup_origins.origin_buckets,
+        startup_origins.origin_edge_contexts,
     );
 
     Ok(RenderRuntime {
@@ -113,131 +79,6 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         origin_runtime,
         origin_refresh,
     })
-}
-
-fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
-    manifest
-        .origins
-        .iter()
-        .map(|(origin_id, origin)| (origin_id.clone(), origin.edge_context_bucket(origin_id)))
-        .collect()
-}
-
-fn origin_edge_contexts(manifest: &RenderMeshManifest) -> BTreeMap<String, serde_json::Value> {
-    manifest
-        .origins
-        .iter()
-        .filter_map(|(origin_id, origin)| {
-            origin
-                .edge_context()
-                .cloned()
-                .map(|context| (origin_id.clone(), context))
-        })
-        .collect()
-}
-
-async fn build_origin_cdns(
-    manifest: &RenderMeshManifest,
-) -> Result<BTreeMap<String, OriginCdnRefresh>> {
-    let mut output = BTreeMap::new();
-
-    for (origin_id, origin) in &manifest.origins {
-        let Some(config) = origin.cdn() else {
-            continue;
-        };
-        let url_prefixes = exact_url_prefixes_for_origin(manifest, origin_id);
-        output.insert(
-            origin_id.clone(),
-            OriginCdnRefresh::from_config(config, url_prefixes).await?,
-        );
-    }
-
-    Ok(output)
-}
-
-async fn build_origin_cdn_domains(
-    manifest: &RenderMeshManifest,
-) -> Result<BTreeMap<String, OriginCdnDomains>> {
-    let mut output = BTreeMap::new();
-
-    for (origin_id, origin) in &manifest.origins {
-        let Some(config) = origin.cdn() else {
-            continue;
-        };
-        if let Some(domains) = OriginCdnDomains::from_config(config).await? {
-            output.insert(origin_id.clone(), domains);
-        }
-    }
-
-    Ok(output)
-}
-
-async fn reconcile_origin_cdn_domains(
-    origin_id: &str,
-    manifest: &RenderMeshManifest,
-    cdn_domains: &OriginCdnDomains,
-    origin_runtime: &OriginRuntimeStore,
-) {
-    match cdn_domains.reconcile(manifest, origin_id).await {
-        Ok(outcome) => {
-            tracing::info!(
-                origin = %origin_id,
-                provider = %outcome.provider,
-                status = %outcome.status,
-                added = outcome.added,
-                updated = outcome.updated,
-                removed = outcome.removed,
-                unchanged = outcome.unchanged,
-                "cdn domain reconciliation submitted"
-            );
-            origin_runtime.set_cdn_domain_result(
-                origin_id,
-                outcome.provider,
-                outcome.status,
-                outcome.added,
-                outcome.updated,
-                outcome.removed,
-                outcome.unchanged,
-            );
-        }
-        Err(error) => {
-            origin_runtime.set_cdn_domain_error(origin_id, error.to_string());
-            tracing::error!(origin = %origin_id, "cdn domain reconciliation failed: {error}");
-        }
-    }
-}
-
-fn exact_url_prefixes_for_origin(manifest: &RenderMeshManifest, origin_id: &str) -> Vec<String> {
-    manifest
-        .hosts
-        .iter()
-        .filter(|(host, config)| config.origin == origin_id && !host.starts_with("*."))
-        .map(|(host, _)| format!("https://{host}"))
-        .collect()
-}
-
-fn spawn_background_sync(manifest: Arc<RenderMeshManifest>, origin_refresh: OriginRefreshService) {
-    for origin_id in manifest.origins.keys().cloned().collect::<Vec<_>>() {
-        let origin_refresh = origin_refresh.clone();
-        let interval_seconds = manifest
-            .origins
-            .get(&origin_id)
-            .and_then(|origin| origin.sync_interval_seconds())
-            .unwrap_or(manifest.runtime.sync_interval_seconds);
-
-        tokio::spawn(async move {
-            let interval = Duration::from_secs(interval_seconds);
-            loop {
-                tokio::time::sleep(interval).await;
-                if let Err(error) = origin_refresh
-                    .refresh_origin(&origin_id, OriginRefreshTrigger::Background)
-                    .await
-                {
-                    tracing::error!(origin = %origin_id, "background origin sync failed: {error}");
-                }
-            }
-        });
-    }
 }
 
 #[cfg(test)]
@@ -262,6 +103,7 @@ mod tests {
         services::edge_config_store::{EdgeConfigStore, EdgeConfigStoreError},
         services::origin_refresh::{
             load_edge_configs, refresh_origin_snapshot, sync_origin_and_refresh_edge_config,
+            OriginRefreshTrigger,
         },
     };
 
