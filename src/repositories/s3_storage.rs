@@ -122,6 +122,7 @@ mod tests {
             sync_interval_seconds: None,
             activation_barrier_path: None,
             cdn: None,
+            edge_context: None,
         };
 
         let _repository = S3StorageRepository::from_origin_config(&origin)
@@ -144,6 +145,7 @@ mod tests {
             sync_interval_seconds: None,
             activation_barrier_path: None,
             cdn: None,
+            edge_context: None,
         };
 
         let _repository = S3StorageRepository::from_origin_config(&origin)

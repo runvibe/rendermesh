@@ -71,6 +71,8 @@ pub struct EdgeHookContext {
     pub bucket: String,
     pub ip: Option<String>,
     pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edge_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

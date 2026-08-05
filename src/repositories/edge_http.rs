@@ -130,6 +130,7 @@ mod tests {
                         bucket: "app-bucket".to_string(),
                         ip: Some("203.0.113.10".to_string()),
                         origin: "app".to_string(),
+                        edge_context: None,
                     },
                     request: EdgeHookHttpRequest {
                         url: "https://app.test/".to_string(),

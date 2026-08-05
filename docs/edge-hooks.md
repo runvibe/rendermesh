@@ -11,7 +11,11 @@ RenderMesh sends a `POST` request with JSON:
   "context": {
     "bucket": "bucket_my_app_123",
     "ip": "203.0.113.10",
-    "origin": "my_app"
+    "origin": "my_app",
+    "edge_context": {
+      "tenant_id": "loja-123",
+      "environment": "production"
+    }
   },
   "request": {
     "url": "https://myapp.com/path?query=1",
@@ -34,6 +38,7 @@ RenderMesh sends a `POST` request with JSON:
 - `bucket`: Bucket name for S3 origins. For local origins, RenderMesh currently sends the origin id for compatibility with the existing edge DTO.
 - `ip`: Client IP inferred from `x-forwarded-for` or `x-real-ip`; `null` when unavailable.
 - `origin`: Origin id from the global manifest.
+- `edge_context`: Optional static value from the resolved origin's global manifest config. Omitted when the origin does not define it.
 
 ## `request`
 

@@ -298,6 +298,10 @@ origins:
     force_path_style_env: MY_APP_FORCE_PATH_STYLE
     sync_interval_seconds: 30
     activation_barrier_path: .rendermesh/edge.yaml
+    edge_context:
+      tenant_id: loja-123
+      feature_flags:
+        checkout_v2: true
 hosts:
   myapp.com:
     origin: my_app
@@ -320,6 +324,15 @@ hosts:
                 assert_eq!(
                     origin.activation_barrier_path.as_deref(),
                     Some(".rendermesh/edge.yaml")
+                );
+                assert_eq!(
+                    origin.edge_context.as_ref(),
+                    Some(&serde_json::json!({
+                        "tenant_id": "loja-123",
+                        "feature_flags": {
+                            "checkout_v2": true
+                        }
+                    }))
                 );
             }
             other => panic!("expected s3 origin, got {other:?}"),
@@ -346,7 +359,14 @@ hosts:
       "access_key_id_env": "MY_APP_ACCESS_KEY_ID",
       "secret_access_key_env": "MY_APP_SECRET_ACCESS_KEY",
       "force_path_style_env": "MY_APP_FORCE_PATH_STYLE",
-      "sync_interval_seconds": 30
+      "sync_interval_seconds": 30,
+      "edge_context": {
+        "tenant_id": "loja-123",
+        "theme": "dark",
+        "feature_flags": {
+          "checkout_v2": true
+        }
+      }
     }
   },
   "hosts": {
@@ -364,7 +384,19 @@ hosts:
 
         assert_eq!(manifest.version, 1);
         match &manifest.origins["my_app"] {
-            OriginConfig::S3(origin) => assert_eq!(origin.bucket, "bucket_my_app_123"),
+            OriginConfig::S3(origin) => {
+                assert_eq!(origin.bucket, "bucket_my_app_123");
+                assert_eq!(
+                    origin.edge_context.as_ref(),
+                    Some(&serde_json::json!({
+                        "tenant_id": "loja-123",
+                        "theme": "dark",
+                        "feature_flags": {
+                            "checkout_v2": true
+                        }
+                    }))
+                );
+            }
             other => panic!("expected s3 origin, got {other:?}"),
         }
         assert_eq!(manifest.hosts["*.myapp.com"].origin, "my_app");
@@ -383,6 +415,11 @@ origins:
     type: local
     path: ./examples/local/bucket
     sync_interval_seconds: 5
+    edge_context:
+      app_name: docs
+      audiences:
+        - public
+        - developers
 hosts:
   docs.test:
     origin: docs
@@ -394,6 +431,13 @@ hosts:
             crate::dto::manifest::OriginConfig::Local(origin) => {
                 assert_eq!(origin.path, "./examples/local/bucket");
                 assert_eq!(origin.sync_interval_seconds, Some(5));
+                assert_eq!(
+                    origin.edge_context.as_ref(),
+                    Some(&serde_json::json!({
+                        "app_name": "docs",
+                        "audiences": ["public", "developers"]
+                    }))
+                );
             }
             other => panic!("expected local origin, got {other:?}"),
         }

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
+use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct RenderMeshManifest {
@@ -51,6 +52,13 @@ impl OriginConfig {
             Self::Local(origin) => origin.activation_barrier_path.as_deref(),
         }
     }
+
+    pub fn edge_context(&self) -> Option<&Value> {
+        match self {
+            Self::S3(origin) => origin.edge_context.as_ref(),
+            Self::Local(origin) => origin.edge_context.as_ref(),
+        }
+    }
 }
 
 impl CdnConfig {
@@ -74,6 +82,7 @@ pub struct S3OriginConfig {
     pub sync_interval_seconds: Option<u64>,
     pub activation_barrier_path: Option<String>,
     pub cdn: Option<CdnConfig>,
+    pub edge_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -83,6 +92,7 @@ pub struct LocalOriginConfig {
     pub sync_interval_seconds: Option<u64>,
     pub activation_barrier_path: Option<String>,
     pub cdn: Option<CdnConfig>,
+    pub edge_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]

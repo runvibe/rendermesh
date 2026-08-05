@@ -341,11 +341,12 @@ async fn edge_hook_request_body_is_empty_for_mvp() {
         origin_id: "web".to_string(),
     };
 
-    let edge_request = edge_hook_request(&request, &resolved, "web-bucket");
+    let edge_request = edge_hook_request(&request, &resolved, "web-bucket", None);
 
     assert_eq!(edge_request.context.origin, "web");
     assert_eq!(edge_request.context.bucket, "web-bucket");
     assert_eq!(edge_request.context.ip.as_deref(), Some("203.0.113.10"));
+    assert_eq!(edge_request.context.edge_context, None);
     assert_eq!(edge_request.request.url, "https://web.test/");
     assert_eq!(edge_request.request.path, "/");
     assert_eq!(edge_request.request.querystring, "");
@@ -366,7 +367,7 @@ async fn edge_hook_request_includes_path_querystring_and_queryparams() {
         origin_id: "web".to_string(),
     };
 
-    let edge_request = edge_hook_request(&request, &resolved, "web-bucket");
+    let edge_request = edge_hook_request(&request, &resolved, "web-bucket", None);
 
     assert_eq!(
         edge_request.request.url,
@@ -385,6 +386,32 @@ async fn edge_hook_request_includes_path_querystring_and_queryparams() {
             ("term".to_string(), "last".to_string()),
         ])
     );
+}
+
+#[tokio::test]
+async fn edge_hook_request_includes_configured_edge_context() {
+    let request = test_request(Method::GET, "/");
+    let resolved = ResolvedHost {
+        normalized_host: "web.test".to_string(),
+        matched_host: "web.test".to_string(),
+        origin_id: "web".to_string(),
+    };
+
+    let edge_context = serde_json::json!({
+        "tenant_id": "loja-123",
+        "feature_flags": {
+            "checkout_v2": true
+        }
+    });
+
+    let edge_request = edge_hook_request(
+        &request,
+        &resolved,
+        "web-bucket",
+        Some(edge_context.clone()),
+    );
+
+    assert_eq!(edge_request.context.edge_context, Some(edge_context));
 }
 
 #[tokio::test]
@@ -422,6 +449,59 @@ async fn edge_http_payload_includes_path_querystring_and_queryparams() {
             query: Some("term=hello%20world&page=2".to_string()),
             ..test_request(Method::GET, "/search")
         })
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn edge_http_payload_includes_origin_edge_context() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/edge"))
+        .and(body_json(serde_json::json!({
+            "context": {
+                "bucket": "web",
+                "ip": null,
+                "origin": "web",
+                "edge_context": {
+                    "tenant_id": "loja-123",
+                    "theme": "dark",
+                    "feature_flags": {
+                        "checkout_v2": true
+                    }
+                }
+            },
+            "request": {
+                "url": "https://web.test/",
+                "path": "/",
+                "querystring": "",
+                "queryparams": {},
+                "method": "GET",
+                "headers": {},
+                "body": ""
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&server)
+        .await;
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(temp.path(), "index.html", "ok", None).await;
+    let service = test_gateway_with_edge_url_and_context(
+        temp.path().join("origins"),
+        &server.uri(),
+        serde_json::json!({
+            "tenant_id": "loja-123",
+            "theme": "dark",
+            "feature_flags": {
+                "checkout_v2": true
+            }
+        }),
+    );
+
+    let response = service
+        .handle(test_request(Method::GET, "/"))
         .await
         .expect("response");
 
@@ -667,6 +747,25 @@ fn test_gateway_with_edge_url(
     test_gateway_with_edge_url_and_templates(root, edge_base_url, TemplateStore::default())
 }
 
+fn test_gateway_with_edge_url_and_context(
+    root: std::path::PathBuf,
+    edge_base_url: &str,
+    edge_context: serde_json::Value,
+) -> RenderGatewayService {
+    test_gateway_with_config_templates_and_context(
+        root,
+        edge_config(&format!(
+            r#"edges:
+  - name: test
+    url: {edge_base_url}/edge
+    timeout_ms: 500
+"#
+        )),
+        TemplateStore::default(),
+        [("web".to_string(), edge_context)].into(),
+    )
+}
+
 fn test_gateway_with_edge_url_and_templates(
     root: std::path::PathBuf,
     edge_base_url: &str,
@@ -693,14 +792,25 @@ fn test_gateway_with_config_and_templates(
     config: EdgeConfig,
     template_store: TemplateStore,
 ) -> RenderGatewayService {
+    test_gateway_with_config_templates_and_context(root, config, template_store, BTreeMap::new())
+}
+
+fn test_gateway_with_config_templates_and_context(
+    root: std::path::PathBuf,
+    config: EdgeConfig,
+    template_store: TemplateStore,
+    edge_contexts: BTreeMap<String, serde_json::Value>,
+) -> RenderGatewayService {
     let manifest = test_manifest();
 
-    RenderGatewayService::new_for_tests_with_template_store(
+    RenderGatewayService::new_with_stores_origin_buckets_and_edge_contexts(
         HostResolver::new(&manifest).expect("resolver"),
         CorsPolicy::from_manifest(&manifest),
         LocalMirrorRepository::new(root),
-        [("web".to_string(), config)].into(),
+        EdgeConfigStore::from_configs([("web".to_string(), config)].into()),
         template_store,
+        BTreeMap::new(),
+        edge_contexts,
     )
 }
 fn test_request(method: Method, path: &str) -> RenderRequest {

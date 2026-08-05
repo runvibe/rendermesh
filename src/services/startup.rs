@@ -98,13 +98,14 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
 
     spawn_background_sync(manifest.clone(), origin_refresh.clone());
 
-    let render_gateway = RenderGatewayService::new_with_stores_and_origin_buckets(
+    let render_gateway = RenderGatewayService::new_with_stores_origin_buckets_and_edge_contexts(
         HostResolver::new(&manifest)?,
         CorsPolicy::from_manifest(&manifest),
         mirror,
         edge_configs,
         template_store,
         origin_buckets(&manifest),
+        origin_edge_contexts(&manifest),
     );
 
     Ok(RenderRuntime {
@@ -119,6 +120,19 @@ fn origin_buckets(manifest: &RenderMeshManifest) -> BTreeMap<String, String> {
         .origins
         .iter()
         .map(|(origin_id, origin)| (origin_id.clone(), origin.edge_context_bucket(origin_id)))
+        .collect()
+}
+
+fn origin_edge_contexts(manifest: &RenderMeshManifest) -> BTreeMap<String, serde_json::Value> {
+    manifest
+        .origins
+        .iter()
+        .filter_map(|(origin_id, origin)| {
+            origin
+                .edge_context()
+                .cloned()
+                .map(|context| (origin_id.clone(), context))
+        })
         .collect()
 }
 

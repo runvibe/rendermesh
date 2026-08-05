@@ -81,6 +81,7 @@ S3 origin fields:
 - `secret_access_key_env`: Optional environment variable containing the secret access key for static credentials.
 - `force_path_style_env`: Optional environment variable controlling path-style S3 access.
 - `sync_interval_seconds`: Optional origin-specific sync interval.
+- `edge_context`: Optional static JSON/YAML value sent to edge hooks as `context.edge_context`.
 
 For EKS with IRSA or other AWS managed identities, omit `access_key_id_env` and `secret_access_key_env`:
 
@@ -111,6 +112,7 @@ Local origin fields:
 - `type`: `local`.
 - `path`: Source directory for the origin.
 - `sync_interval_seconds`: Optional origin-specific sync interval.
+- `edge_context`: Optional static JSON/YAML value sent to edge hooks as `context.edge_context`.
 
 ```yaml
 origins:
@@ -123,6 +125,26 @@ origins:
 Absolute local paths are used as configured. Relative local paths are resolved from the directory containing the global manifest file. The path must exist and be a directory during startup.
 
 Local origins do not accept S3 fields such as `bucket`, `endpoint_env`, `region_env`, `access_key_id_env`, `secret_access_key_env`, or `force_path_style_env`.
+
+### `edge_context`
+
+Use `edge_context` for non-secret origin metadata that every edge hook for that origin should receive.
+
+```yaml
+origins:
+  storefront:
+    type: s3
+    bucket: storefront-prod
+    endpoint_env: STOREFRONT_STORAGE_ENDPOINT
+    region_env: STOREFRONT_STORAGE_REGION
+    edge_context:
+      tenant_id: loja-123
+      environment: production
+      feature_flags:
+        checkout_v2: true
+```
+
+RenderMesh does not interpolate environment variables inside `edge_context`. Do not put credentials, API tokens, private keys, session tokens, or end-user personal data in this field.
 
 ## `cdn`
 
