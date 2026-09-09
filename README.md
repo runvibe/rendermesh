@@ -16,8 +16,10 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
 - Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
-- CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
+- CDN refresh can purge CloudFront, CloudFront SaaS tenants, or Cloudflare after a new origin generation is activated.
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
+- `cloudfront_saas` automatically reconciles one single-domain tenant per exact host, preserves existing AWS customizations, and owns the tenant `enabled` state, including re-enabling explicitly disabled matching tenants. After activation it submits one tenant-specific invalidation per matching enabled tenant with restart-collision-safe caller references, retaining completed request IDs in runtime state if a later invalidation fails.
+- Startup shares one CloudFront SaaS repository between refresh and tenant reconciliation; reconciliation follows initial activation, so the first purge may report `skipped_no_tenants`.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - Authorized operators can force an immediate per-origin sync without restarting the service.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.
@@ -34,7 +36,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
 - [Edge Context](docs/edge-context.md): origin-level custom context sent to edge hooks.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
-- [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
+- [CDN Refresh](docs/cdn-refresh.md): CloudFront, CloudFront SaaS tenant, and Cloudflare purge configuration and lifecycle.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
 - [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.
@@ -127,9 +129,17 @@ hosts:
     origin: my_app
   "*.myapp.com":
     origin: my_app
+  "*":
+    origin: my_app
 ```
 
-Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
+Host resolution uses this precedence: exact host, most specific domain wildcard,
+then the global `*` fallback. The global wildcard accepts any otherwise-unmatched
+valid host and reports `*` as the matched rule while preserving the incoming
+normalized host. Without `*`, unknown hosts return `421 Misdirected Request`.
+
+The global wildcard affects routing only. It does not allow arbitrary CORS
+origins and is not included in CDN domain reconciliation.
 
 For AWS environments, omit `access_key_id_env` and `secret_access_key_env` to use the AWS SDK default credential chain, including EKS IRSA. For S3-compatible local labs or providers that require static credentials, configure both fields.
 
@@ -234,6 +244,7 @@ curl -X POST \
 ```
 
 Manual sync runs the same atomic activation pipeline as startup and background sync. If listing, edge config parsing, or HTML template compilation fails, RenderMesh keeps the previous generation active. If `RENDERMESH_ADMIN_TOKEN` is not set, the endpoint returns `403`.
+When a CDN purge is submitted, the sync response keeps the legacy `request_id` field as the first provider request and also includes `request_ids` with the full submitted request vector.
 
 ## Edge Hook Contract
 

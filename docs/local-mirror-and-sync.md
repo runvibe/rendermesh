@@ -76,7 +76,7 @@ curl -X POST \
 
 Manual sync uses the same pipeline as startup and background sync. It stages the mirror, parses the staged edge config, compiles staged HTML templates, activates the next generation, and then submits CDN refresh when configured. If a required pre-activation step fails, the previous generation remains active.
 
-The response includes the activated generation, freshness counts, downloaded file count, and CDN submission details when a CDN refresh is submitted. A concurrent refresh for the same origin returns `409 Conflict`; different origins may refresh concurrently.
+The response includes the activated generation, freshness counts, downloaded file count, and CDN submission details when a CDN refresh is submitted. CDN responses preserve the legacy `request_id` as the first submitted request and also expose `request_ids` with the full provider response vector. A concurrent refresh for the same origin returns `409 Conflict`; different origins may refresh concurrently.
 
 ## Freshness Index
 
@@ -125,7 +125,7 @@ POST /_rendermesh/origins/{origin_id}/sync
 
 The `GET` endpoints are read-only. `POST /sync` is administrative and requires the bearer token described above.
 
-Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, last CDN provider/status/request id/submitted item count/error, and the last background or manual refresh error when present.
+Snapshots include the origin id, generation, activation time, capture time, known file count, added/modified/removed/unchanged counts, downloaded file count, last CDN provider/status/request id/request ids/submitted item count/error, and the last background or manual refresh error when present.
 
 ## Refresh Behavior
 

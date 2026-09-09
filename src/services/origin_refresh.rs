@@ -15,7 +15,7 @@ use crate::{
         sync::MirrorSyncService, sync::RemoteStorage,
     },
     services::{
-        cdn_refresh::OriginCdnRefresh,
+        cdn_refresh::{CdnRefreshFailure, OriginCdnRefresh},
         edge_config::{default_edge_config, parse_edge_config},
         edge_config_store::EdgeConfigStore,
         freshness::OriginFreshnessIndex,
@@ -319,6 +319,7 @@ where
         last_cdn_provider: None,
         last_cdn_status: None,
         last_cdn_request_id: None,
+        last_cdn_request_ids: Vec::new(),
         last_cdn_refreshed_at: None,
         last_cdn_submitted_items: None,
         last_cdn_error: None,
@@ -366,17 +367,21 @@ where
                     changed_count = outcome.changed_count,
                     "cdn refresh submitted"
                 );
+                let request_id = outcome.request_ids.first().cloned();
+                let request_ids = outcome.request_ids.clone();
                 let cdn = OriginSyncCdnResponse {
                     provider: outcome.provider.clone(),
                     status: outcome.status.clone(),
-                    request_id: outcome.request_id.clone(),
+                    request_id: request_id.clone(),
+                    request_ids: request_ids.clone(),
                     submitted_items: outcome.submitted_items,
                 };
                 origin_runtime.set_cdn_result(
                     origin_id,
                     outcome.provider,
                     outcome.status,
-                    outcome.request_id,
+                    request_id,
+                    request_ids,
                     outcome.submitted_items,
                 );
                 Some(cdn)
@@ -390,6 +395,19 @@ where
                 None
             }
             Err(error) => {
+                if let Some(failure) = error
+                    .downcast_ref::<CdnRefreshFailure>()
+                    .filter(|failure| !failure.request_ids.is_empty())
+                {
+                    origin_runtime.set_cdn_result(
+                        origin_id,
+                        failure.provider.clone(),
+                        "partial_failure",
+                        failure.request_ids.first().cloned(),
+                        failure.request_ids.clone(),
+                        failure.submitted_items,
+                    );
+                }
                 origin_runtime.set_cdn_error(origin_id, error.to_string());
                 tracing::error!(
                     origin = %origin_id,
@@ -522,6 +540,131 @@ mod activation_barrier_tests {
             content_type: None,
             cache_control: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod cdn_failure_tests {
+    use std::{collections::BTreeMap, sync::Arc};
+
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+
+    use super::{refresh_origin_snapshot, OriginFreshnessIndexes};
+    use crate::{
+        dto::manifest::CdnRefreshStrategy,
+        repositories::{
+            cdn::{CdnPurge, CdnPurgeFailure, CdnPurgeRequest, CdnPurgeResult},
+            local_mirror::LocalMirrorRepository,
+            sync::{MirrorSyncService, RemoteObject, RemoteObjectSummary, RemoteStorage},
+        },
+        services::{
+            cdn_refresh::OriginCdnRefresh, edge_config_store::EdgeConfigStore,
+            origin_runtime::OriginRuntimeStore, template_store::TemplateStore,
+        },
+    };
+
+    struct PartialFanoutPurge;
+
+    #[async_trait]
+    impl CdnPurge for PartialFanoutPurge {
+        async fn purge(&self, _request: CdnPurgeRequest) -> anyhow::Result<CdnPurgeResult> {
+            Err(anyhow!(CdnPurgeFailure {
+                provider: "cloudfront_saas".to_string(),
+                request_ids: vec!["INV-1".to_string()],
+                submitted_items: 2,
+                message: "invalidate tenant-b: service unavailable".to_string(),
+            }))
+        }
+    }
+
+    struct SingleObjectStorage;
+
+    #[async_trait]
+    impl RemoteStorage for SingleObjectStorage {
+        async fn list_objects(&self) -> anyhow::Result<Vec<RemoteObjectSummary>> {
+            Ok(vec![RemoteObjectSummary {
+                key: "index.html".to_string(),
+                created_at: None,
+                etag: Some("index-v1".to_string()),
+                last_modified: None,
+                size: 14,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            }])
+        }
+
+        async fn get_object(&self, _key: &str) -> anyhow::Result<RemoteObject> {
+            Ok(RemoteObject {
+                key: "index.html".to_string(),
+                body: Bytes::from_static(b"<h1>Hello</h1>"),
+                etag: Some("index-v1".to_string()),
+                last_modified: None,
+                content_type: Some("text/html".to_string()),
+                cache_control: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_cdn_fanout_keeps_activation_success_and_runtime_request_ids() {
+        let root = std::env::current_dir()
+            .expect("current directory")
+            .join("target")
+            .join(format!("partial-cdn-fanout-{}", uuid::Uuid::new_v4()));
+        let syncer = MirrorSyncService::new(&root);
+        let edge_configs = EdgeConfigStore::from_configs(BTreeMap::new());
+        let template_store = TemplateStore::default();
+        let freshness_indexes = OriginFreshnessIndexes::default();
+        let origin_runtime = OriginRuntimeStore::default();
+        let cdn_refresh = OriginCdnRefresh::with_repository(
+            Arc::new(PartialFanoutPurge),
+            CdnRefreshStrategy::ChangedPaths,
+            Vec::new(),
+        );
+
+        let response = refresh_origin_snapshot(
+            "web",
+            &syncer,
+            &SingleObjectStorage,
+            Some(&cdn_refresh),
+            &edge_configs,
+            &template_store,
+            &freshness_indexes,
+            &origin_runtime,
+            None,
+        )
+        .await
+        .expect("CDN failure must not roll back origin activation");
+
+        assert_eq!(response.generation, 1);
+        assert_eq!(response.cdn, None);
+        let mirror = LocalMirrorRepository::new(&root);
+        assert!(
+            mirror
+                .read_object("web", "/index.html")
+                .await
+                .expect("read active mirror")
+                .is_some(),
+            "activated object remains available"
+        );
+        let snapshot = origin_runtime.get("web").expect("runtime snapshot");
+        assert_eq!(snapshot.last_cdn_status.as_deref(), Some("partial_failure"));
+        assert_eq!(snapshot.last_cdn_request_id.as_deref(), Some("INV-1"));
+        assert_eq!(snapshot.last_cdn_request_ids, ["INV-1"]);
+        assert_eq!(snapshot.last_cdn_submitted_items, Some(2));
+        assert!(
+            snapshot
+                .last_cdn_error
+                .as_deref()
+                .is_some_and(|error| error.contains("service unavailable")),
+            "runtime records the fanout failure"
+        );
+
+        tokio::fs::remove_dir_all(root)
+            .await
+            .expect("remove test mirror");
     }
 }
 

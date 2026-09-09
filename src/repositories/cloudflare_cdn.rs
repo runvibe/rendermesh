@@ -101,9 +101,11 @@ impl CdnPurge for CloudflareCdnRepository {
 
         Ok(CdnPurgeResult {
             provider: "cloudflare".to_string(),
-            request_id: parsed
+            request_ids: parsed
                 .and_then(|response| response.result)
-                .and_then(|result| result.id),
+                .and_then(|result| result.id)
+                .into_iter()
+                .collect(),
             status: "submitted".to_string(),
             submitted_items,
         })
@@ -351,7 +353,7 @@ mod tests {
             .expect("purge succeeds");
 
         assert_eq!(result.provider, "cloudflare");
-        assert_eq!(result.request_id.as_deref(), Some("purge-123"));
+        assert_eq!(result.request_ids, vec!["purge-123".to_string()]);
         assert_eq!(result.submitted_items, 1);
 
         let requests = server.received_requests().await.expect("requests");

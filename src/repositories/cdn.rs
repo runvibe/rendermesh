@@ -1,10 +1,14 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 
 use crate::repositories::{
     cloudflare_cdn::CloudflareCdnRepository, cloudfront_cdn::CloudFrontCdnRepository,
+    cloudfront_saas_cdn::CloudFrontSaasCdnRepository,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,10 +28,34 @@ pub enum CdnPurgeMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CdnPurgeResult {
     pub provider: String,
-    pub request_id: Option<String>,
+    pub request_ids: Vec<String>,
     pub status: String,
     pub submitted_items: usize,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnPurgeFailure {
+    pub provider: String,
+    pub request_ids: Vec<String>,
+    pub submitted_items: usize,
+    pub message: String,
+}
+
+impl fmt::Display for CdnPurgeFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.request_ids.is_empty() {
+            return formatter.write_str(&self.message);
+        }
+        write!(
+            formatter,
+            "{}; completed invalidation request ids: [{}]",
+            self.message,
+            self.request_ids.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for CdnPurgeFailure {}
 
 #[async_trait]
 pub trait CdnPurge: Send + Sync {
@@ -62,9 +90,37 @@ pub trait CdnDomainReconcile: Send + Sync {
     ) -> Result<CdnDomainReconcileResult>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnTenantConfig {
+    pub distribution_id: String,
+    pub connection_group_id: Option<String>,
+    pub parameters: BTreeMap<String, String>,
+    pub managed_certificate: Option<ManagedCertificateRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCertificateRequest {
+    pub validation_token_host: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnTenantReconcileRequest {
+    pub origin_id: String,
+    pub desired_domains: BTreeSet<String>,
+}
+
+#[async_trait]
+pub trait CdnTenantReconcile: Send + Sync {
+    async fn reconcile_tenants(
+        &self,
+        request: CdnTenantReconcileRequest,
+    ) -> Result<CdnDomainReconcileResult>;
+}
+
 #[derive(Clone)]
 pub enum CdnPurgeRepository {
     CloudFront(CloudFrontCdnRepository),
+    CloudFrontSaas(CloudFrontSaasCdnRepository),
     Cloudflare(CloudflareCdnRepository),
 }
 
@@ -73,6 +129,7 @@ impl CdnPurge for CdnPurgeRepository {
     async fn purge(&self, request: CdnPurgeRequest) -> Result<CdnPurgeResult> {
         match self {
             Self::CloudFront(repository) => repository.purge(request).await,
+            Self::CloudFrontSaas(repository) => repository.purge(request).await,
             Self::Cloudflare(repository) => repository.purge(request).await,
         }
     }
@@ -86,6 +143,9 @@ impl CdnDomainReconcile for CdnPurgeRepository {
     ) -> Result<CdnDomainReconcileResult> {
         match self {
             Self::CloudFront(repository) => repository.reconcile_domains(request).await,
+            Self::CloudFrontSaas(_) => Err(anyhow!(
+                "CloudFront SaaS does not support distribution domain reconciliation"
+            )),
             Self::Cloudflare(repository) => repository.reconcile_domains(request).await,
         }
     }
@@ -111,4 +171,21 @@ pub fn ensure_cloudflare_mode(mode: CdnPurgeMode) -> Result<CloudflarePurgePaylo
 pub enum CloudflarePurgePayload {
     Everything,
     Files(Vec<String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CdnPurgeFailure;
+
+    #[test]
+    fn purge_failure_without_completed_requests_omits_empty_request_id_list() {
+        let failure = CdnPurgeFailure {
+            provider: "cloudfront_saas".to_string(),
+            request_ids: Vec::new(),
+            submitted_items: 0,
+            message: "tenant invalidation failed".to_string(),
+        };
+
+        assert_eq!(failure.to_string(), "tenant invalidation failed");
+    }
 }

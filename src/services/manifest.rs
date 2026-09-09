@@ -20,6 +20,7 @@ pub struct ResolvedHost {
 pub struct HostResolver {
     exact: BTreeMap<String, String>,
     wildcards: Vec<WildcardHost>,
+    fallback: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -33,10 +34,15 @@ impl HostResolver {
     pub fn new(manifest: &RenderMeshManifest) -> Result<Self> {
         let mut exact = BTreeMap::new();
         let mut wildcards = Vec::new();
+        let mut fallback = None;
 
         for (host, config) in &manifest.hosts {
             let normalized = host.trim().to_ascii_lowercase();
-            if let Some(suffix) = normalized.strip_prefix("*.") {
+            if normalized == "*" {
+                if fallback.replace(config.origin.clone()).is_some() {
+                    return Err(anyhow!("duplicate global wildcard host"));
+                }
+            } else if let Some(suffix) = normalized.strip_prefix("*.") {
                 let suffix = suffix.to_string();
                 if normalize_host(&suffix).as_deref() != Some(suffix.as_str()) {
                     return Err(anyhow!("invalid wildcard host {host}"));
@@ -56,7 +62,11 @@ impl HostResolver {
 
         wildcards.sort_by(|left, right| right.suffix.len().cmp(&left.suffix.len()));
 
-        Ok(Self { exact, wildcards })
+        Ok(Self {
+            exact,
+            wildcards,
+            fallback,
+        })
     }
 
     pub fn resolve(&self, host_header: &str) -> Option<ResolvedHost> {
@@ -82,7 +92,11 @@ impl HostResolver {
             }
         }
 
-        None
+        self.fallback.as_ref().map(|origin_id| ResolvedHost {
+            normalized_host,
+            matched_host: "*".to_string(),
+            origin_id: origin_id.clone(),
+        })
     }
 }
 
@@ -224,9 +238,43 @@ fn validate_cdn_config(origin_id: &str, cdn: Option<&CdnConfig>) -> Result<()> {
             }
             validate_cdn_domain_config(origin_id, config.domains.as_ref(), false)?;
         }
+        Some(CdnConfig::CloudFrontSaas(config)) => {
+            validate_cloudfront_saas_cdn_config(origin_id, config)?;
+        }
         None => {}
     }
 
+    Ok(())
+}
+
+fn validate_cloudfront_saas_cdn_config(
+    origin_id: &str,
+    config: &crate::dto::manifest::CloudFrontSaasCdnConfig,
+) -> Result<()> {
+    if config.distribution_id_env.trim().is_empty() {
+        return Err(anyhow!(
+            "origin {origin_id} cdn.distribution_id_env is required"
+        ));
+    }
+    if let Some(connection_group_id_env) = config.connection_group_id_env.as_deref() {
+        if connection_group_id_env.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.connection_group_id_env is required"
+            ));
+        }
+    }
+    for (parameter_name, parameter_env) in &config.parameters_env {
+        if parameter_name.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.parameters_env contains an empty parameter name"
+            ));
+        }
+        if parameter_env.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.parameters_env.{parameter_name} is required"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -278,616 +326,4 @@ fn validate_origin_id(origin_id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_manifest() -> &'static str {
-        r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  my_app:
-    type: s3
-    bucket: bucket_my_app_123
-    endpoint_env: MY_APP_STORAGE_ENDPOINT
-    region_env: MY_APP_STORAGE_REGION
-    access_key_id_env: MY_APP_ACCESS_KEY_ID
-    secret_access_key_env: MY_APP_SECRET_ACCESS_KEY
-    force_path_style_env: MY_APP_FORCE_PATH_STYLE
-    sync_interval_seconds: 30
-    activation_barrier_path: .rendermesh/edge.yaml
-    edge_context:
-      tenant_id: loja-123
-      feature_flags:
-        checkout_v2: true
-hosts:
-  myapp.com:
-    origin: my_app
-  "*.myapp.com":
-    origin: my_app
-"#
-    }
-
-    #[test]
-    fn parses_manifest_runtime_origins_and_hosts() {
-        let manifest = parse_manifest_yaml(sample_manifest()).expect("manifest parses");
-
-        assert_eq!(manifest.version, 1);
-        assert_eq!(manifest.runtime.local_store_dir, "./var/rendermesh/origins");
-        assert_eq!(manifest.runtime.sync_interval_seconds, 60);
-        match &manifest.origins["my_app"] {
-            OriginConfig::S3(origin) => {
-                assert_eq!(origin.bucket, "bucket_my_app_123");
-                assert_eq!(origin.sync_interval_seconds, Some(30));
-                assert_eq!(
-                    origin.activation_barrier_path.as_deref(),
-                    Some(".rendermesh/edge.yaml")
-                );
-                assert_eq!(
-                    origin.edge_context.as_ref(),
-                    Some(&serde_json::json!({
-                        "tenant_id": "loja-123",
-                        "feature_flags": {
-                            "checkout_v2": true
-                        }
-                    }))
-                );
-            }
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-        assert_eq!(manifest.hosts["myapp.com"].origin, "my_app");
-    }
-
-    #[test]
-    fn parses_manifest_json() {
-        let manifest = parse_manifest_config(
-            r#"
-{
-  "version": 1,
-  "runtime": {
-    "local_store_dir": "./var/rendermesh/origins",
-    "sync_interval_seconds": 60
-  },
-  "origins": {
-    "my_app": {
-      "type": "s3",
-      "bucket": "bucket_my_app_123",
-      "endpoint_env": "MY_APP_STORAGE_ENDPOINT",
-      "region_env": "MY_APP_STORAGE_REGION",
-      "access_key_id_env": "MY_APP_ACCESS_KEY_ID",
-      "secret_access_key_env": "MY_APP_SECRET_ACCESS_KEY",
-      "force_path_style_env": "MY_APP_FORCE_PATH_STYLE",
-      "sync_interval_seconds": 30,
-      "edge_context": {
-        "tenant_id": "loja-123",
-        "theme": "dark",
-        "feature_flags": {
-          "checkout_v2": true
-        }
-      }
-    }
-  },
-  "hosts": {
-    "myapp.com": {
-      "origin": "my_app"
-    },
-    "*.myapp.com": {
-      "origin": "my_app"
-    }
-  }
-}
-"#,
-        )
-        .expect("json manifest parses");
-
-        assert_eq!(manifest.version, 1);
-        match &manifest.origins["my_app"] {
-            OriginConfig::S3(origin) => {
-                assert_eq!(origin.bucket, "bucket_my_app_123");
-                assert_eq!(
-                    origin.edge_context.as_ref(),
-                    Some(&serde_json::json!({
-                        "tenant_id": "loja-123",
-                        "theme": "dark",
-                        "feature_flags": {
-                            "checkout_v2": true
-                        }
-                    }))
-                );
-            }
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-        assert_eq!(manifest.hosts["*.myapp.com"].origin, "my_app");
-    }
-
-    #[test]
-    fn parses_local_origin_from_yaml() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  docs:
-    type: local
-    path: ./examples/local/bucket
-    sync_interval_seconds: 5
-    edge_context:
-      app_name: docs
-      audiences:
-        - public
-        - developers
-hosts:
-  docs.test:
-    origin: docs
-"#,
-        )
-        .expect("local manifest parses");
-
-        match &manifest.origins["docs"] {
-            crate::dto::manifest::OriginConfig::Local(origin) => {
-                assert_eq!(origin.path, "./examples/local/bucket");
-                assert_eq!(origin.sync_interval_seconds, Some(5));
-                assert_eq!(
-                    origin.edge_context.as_ref(),
-                    Some(&serde_json::json!({
-                        "app_name": "docs",
-                        "audiences": ["public", "developers"]
-                    }))
-                );
-            }
-            other => panic!("expected local origin, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_local_origin_from_json() {
-        let manifest = parse_manifest_config(
-            r#"
-{
-  "version": 1,
-  "runtime": {
-    "local_store_dir": "./var/rendermesh/origins",
-    "sync_interval_seconds": 60
-  },
-  "origins": {
-    "docs": {
-      "type": "local",
-      "path": "./examples/local/bucket",
-      "sync_interval_seconds": 5
-    }
-  },
-  "hosts": {
-    "docs.test": {
-      "origin": "docs"
-    }
-  }
-}
-"#,
-        )
-        .expect("local json manifest parses");
-
-        match &manifest.origins["docs"] {
-            crate::dto::manifest::OriginConfig::Local(origin) => {
-                assert_eq!(origin.path, "./examples/local/bucket");
-                assert_eq!(origin.sync_interval_seconds, Some(5));
-            }
-            other => panic!("expected local origin, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_cloudfront_cdn_config() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  web:
-    type: s3
-    bucket: web-bucket
-    endpoint_env: WEB_ENDPOINT
-    region_env: WEB_REGION
-    cdn:
-      provider: cloudfront
-      distribution_id_env: WEB_DISTRIBUTION_ID
-      strategy: changed_paths
-hosts:
-  web.test:
-    origin: web
-"#,
-        )
-        .expect("manifest parses");
-
-        match &manifest.origins["web"] {
-            OriginConfig::S3(origin) => {
-                assert!(matches!(
-                    origin.cdn,
-                    Some(crate::dto::manifest::CdnConfig::CloudFront(_))
-                ));
-            }
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_cloudflare_cdn_config_from_json() {
-        let manifest = parse_manifest_config(
-            r#"
-{
-  "version": 1,
-  "runtime": {
-    "local_store_dir": "./var/rendermesh/origins",
-    "sync_interval_seconds": 60
-  },
-  "origins": {
-    "docs": {
-      "type": "local",
-      "path": "./docs",
-      "cdn": {
-        "provider": "cloudflare",
-        "zone_id_env": "DOCS_ZONE_ID",
-        "api_token_env": "DOCS_API_TOKEN",
-        "strategy": "changed_paths",
-        "url_prefixes": ["https://docs.test"]
-      }
-    }
-
-  },
-  "hosts": {
-    "docs.test": {
-      "origin": "docs"
-    }
-  }
-}
-"#,
-        )
-        .expect("manifest parses");
-
-        match &manifest.origins["docs"] {
-            OriginConfig::Local(origin) => {
-                assert!(matches!(
-                    origin.cdn,
-                    Some(crate::dto::manifest::CdnConfig::Cloudflare(_))
-                ));
-            }
-            other => panic!("expected local origin, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parses_cdn_domain_reconciliation_config() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  loja:
-    type: s3
-    bucket: loja-bucket
-    endpoint_env: LOJA_ENDPOINT
-    region_env: LOJA_REGION
-    cdn:
-      provider: cloudfront
-      distribution_id_env: LOJA_DISTRIBUTION_ID
-      domains:
-        enabled: true
-        origin_domain_env: RENDERMESH_PUBLIC_ORIGIN
-        certificate_arn_env: LOJA_CERTIFICATE_ARN
-        include_wildcards: true
-        remove_extra_domains: true
-hosts:
-  megaloja.com.br:
-    origin: loja
-"#,
-        )
-        .expect("manifest parses");
-
-        let cdn = manifest.origins["loja"].cdn().expect("cdn config");
-        match cdn {
-            crate::dto::manifest::CdnConfig::CloudFront(config) => {
-                let domains = config.domains.as_ref().expect("domain config");
-                assert!(domains.enabled);
-                assert_eq!(domains.origin_domain_env, "RENDERMESH_PUBLIC_ORIGIN");
-                assert_eq!(
-                    domains.certificate_arn_env.as_deref(),
-                    Some("LOJA_CERTIFICATE_ARN")
-                );
-                assert!(domains.include_wildcards);
-                assert!(domains.remove_extra_domains);
-            }
-            other => panic!("expected cloudfront cdn, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn rejects_empty_local_origin_path() {
-        let yaml = r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  docs:
-    type: local
-    path: " "
-hosts:
-  docs.test:
-    origin: docs
-"#;
-
-        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
-            .expect("yaml parses");
-        let error = validate_manifest(&manifest).expect_err("validation fails");
-
-        assert!(error.to_string().contains("path is required"));
-    }
-
-    #[test]
-    fn rejects_local_origin_with_s3_fields() {
-        let error = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  docs:
-    type: local
-    path: ./docs
-    bucket: docs-bucket
-hosts:
-  docs.test:
-    origin: docs
-"#,
-        )
-        .expect_err("local origin rejects s3 field");
-
-        assert!(error.to_string().contains("bucket"));
-    }
-
-    #[test]
-    fn rejects_s3_origin_with_local_path_field() {
-        let error = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  web:
-    type: s3
-    bucket: web-bucket
-    endpoint_env: WEB_ENDPOINT
-    region_env: WEB_REGION
-    path: ./web
-hosts:
-  web.test:
-    origin: web
-"#,
-        )
-        .expect_err("s3 origin rejects local path");
-
-        assert!(error.to_string().contains("path"));
-    }
-
-    #[test]
-    fn parses_s3_origin_without_static_credential_envs() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  web:
-    type: s3
-    bucket: web-bucket
-    endpoint_env: WEB_ENDPOINT
-    region_env: WEB_REGION
-hosts:
-  app.test:
-    origin: web
-"#,
-        )
-        .expect("manifest parses without static credential envs");
-
-        match &manifest.origins["web"] {
-            OriginConfig::S3(origin) => {
-                assert_eq!(origin.bucket, "web-bucket");
-                assert_eq!(origin.access_key_id_env, None);
-                assert_eq!(origin.secret_access_key_env, None);
-            }
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn load_manifest_reads_json_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("rendermesh.json");
-        tokio::fs::write(
-            &path,
-            r#"
-{
-  "version": 1,
-  "runtime": {
-    "local_store_dir": "./var/rendermesh/origins",
-    "sync_interval_seconds": 45
-  },
-  "origins": {
-    "web": {
-      "type": "s3",
-      "bucket": "web-bucket",
-      "endpoint_env": "WEB_ENDPOINT",
-      "region_env": "WEB_REGION",
-      "access_key_id_env": "WEB_ACCESS_KEY_ID",
-      "secret_access_key_env": "WEB_SECRET_ACCESS_KEY"
-    }
-  },
-  "hosts": {
-    "app.test": {
-      "origin": "web"
-    }
-  }
-}
-"#,
-        )
-        .await
-        .expect("write manifest");
-
-        let manifest = load_manifest(&ManifestRepository::new(), &path)
-            .await
-            .expect("json manifest loads");
-
-        assert_eq!(manifest.runtime.sync_interval_seconds, 45);
-        match &manifest.origins["web"] {
-            OriginConfig::S3(origin) => assert_eq!(origin.bucket, "web-bucket"),
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-        assert_eq!(manifest.hosts["app.test"].origin, "web");
-    }
-
-    #[test]
-    fn rejects_host_that_references_missing_origin() {
-        let yaml = r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins: {}
-hosts:
-  myapp.com:
-    origin: missing
-"#;
-
-        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
-            .expect("yaml parses");
-        let error = validate_manifest(&manifest).expect_err("validation fails");
-
-        assert!(error.to_string().contains("unknown origin missing"));
-    }
-
-    #[test]
-    fn rejects_non_positive_sync_intervals() {
-        let yaml = r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 0
-origins:
-  web:
-    type: s3
-    bucket: web
-    endpoint_env: WEB_ENDPOINT
-    region_env: WEB_REGION
-    access_key_id_env: WEB_KEY
-    secret_access_key_env: WEB_SECRET
-hosts:
-  web.test:
-    origin: web
-"#;
-
-        let manifest = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(yaml)
-            .expect("yaml parses");
-        let error = validate_manifest(&manifest).expect_err("validation fails");
-
-        assert!(error.to_string().contains("sync_interval_seconds"));
-    }
-
-    #[test]
-    fn exact_host_wins_over_wildcard() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  admin:
-    type: s3
-    bucket: admin
-    endpoint_env: ADMIN_ENDPOINT
-    region_env: ADMIN_REGION
-    access_key_id_env: ADMIN_KEY
-    secret_access_key_env: ADMIN_SECRET
-  web:
-    type: s3
-    bucket: web
-    endpoint_env: WEB_ENDPOINT
-    region_env: WEB_REGION
-    access_key_id_env: WEB_KEY
-    secret_access_key_env: WEB_SECRET
-hosts:
-  admin.megaloja.com.br:
-    origin: admin
-  "*.megaloja.com.br":
-    origin: web
-"#,
-        )
-        .expect("manifest parses");
-
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-        let resolved = resolver
-            .resolve("ADMIN.megaloja.com.br:443")
-            .expect("host resolves");
-
-        assert_eq!(resolved.origin_id, "admin");
-        assert_eq!(resolved.matched_host, "admin.megaloja.com.br");
-    }
-
-    #[test]
-    fn most_specific_wildcard_wins() {
-        let manifest = parse_manifest_yaml(
-            r#"
-version: 1
-runtime:
-  local_store_dir: ./var/rendermesh/origins
-  sync_interval_seconds: 60
-origins:
-  broad:
-    type: s3
-    bucket: broad
-    endpoint_env: BROAD_ENDPOINT
-    region_env: BROAD_REGION
-    access_key_id_env: BROAD_KEY
-    secret_access_key_env: BROAD_SECRET
-  narrow:
-    type: s3
-    bucket: narrow
-    endpoint_env: NARROW_ENDPOINT
-    region_env: NARROW_REGION
-    access_key_id_env: NARROW_KEY
-    secret_access_key_env: NARROW_SECRET
-hosts:
-  "*.megaloja.com.br":
-    origin: broad
-  "*.admin.megaloja.com.br":
-    origin: narrow
-"#,
-        )
-        .expect("manifest parses");
-
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-        let resolved = resolver
-            .resolve("x.admin.megaloja.com.br")
-            .expect("host resolves");
-
-        assert_eq!(resolved.origin_id, "narrow");
-    }
-
-    #[test]
-    fn unknown_host_is_none() {
-        let manifest = parse_manifest_yaml(sample_manifest()).expect("manifest parses");
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-
-        assert!(resolver.resolve("unknown.test").is_none());
-    }
-}
+mod tests;

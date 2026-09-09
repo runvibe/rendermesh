@@ -74,6 +74,7 @@ fn setup_render_router_with_admin_token(temp_root: &Path, admin_token: Option<St
         last_cdn_provider: None,
         last_cdn_status: None,
         last_cdn_request_id: None,
+        last_cdn_request_ids: Vec::new(),
         last_cdn_refreshed_at: None,
         last_cdn_submitted_items: None,
         last_cdn_error: None,

@@ -74,6 +74,11 @@ impl OriginCdnDomains {
                     ));
                 }
             },
+            CdnConfig::CloudFrontSaas(_) => {
+                return Err(anyhow!(
+                    "CloudFront SaaS domain reconciliation is not implemented"
+                ));
+            }
         };
 
         Ok(Some(Self {
@@ -130,7 +135,9 @@ pub fn desired_domains_for_origin(
 
 fn normalize_cdn_host(host: &str) -> Option<String> {
     let host = host.trim().to_ascii_lowercase();
-    if let Some(suffix) = host.strip_prefix("*.") {
+    if host == "*" {
+        None
+    } else if let Some(suffix) = host.strip_prefix("*.") {
         normalize_host(suffix).map(|normalized| format!("*.{normalized}"))
     } else {
         normalize_host(&host)
@@ -221,5 +228,39 @@ hosts:
         let domains = desired_domains_for_origin(&manifest, "loja", &config);
 
         assert_eq!(domains, BTreeSet::from(["*.megaloja.com.br".to_string()]));
+    }
+
+    #[test]
+    fn desired_domains_never_include_global_wildcard() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  loja:
+    type: local
+    path: ./site
+hosts:
+  "*":
+    origin: loja
+"#,
+        )
+        .expect("manifest parses");
+
+        for include_wildcards in [false, true] {
+            let config = CdnDomainConfig {
+                enabled: true,
+                mode: DomainReconcileMode::DnsRecords,
+                origin_domain_env: "RENDERMESH_PUBLIC_ORIGIN".to_string(),
+                certificate_arn_env: None,
+                proxied: true,
+                include_wildcards,
+                remove_extra_domains: false,
+            };
+
+            assert!(desired_domains_for_origin(&manifest, "loja", &config).is_empty());
+        }
     }
 }

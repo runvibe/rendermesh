@@ -19,6 +19,9 @@ impl CorsPolicy {
 
         for (host, host_config) in &manifest.hosts {
             let normalized = host.trim().to_ascii_lowercase();
+            if normalized == "*" {
+                continue;
+            }
             let Some(rule) = (if let Some(suffix) = normalized.strip_prefix("*.") {
                 normalize_host(suffix)
                     .filter(|host| host == suffix)
@@ -174,6 +177,32 @@ hosts:
         );
         assert_eq!(
             policy.allowed_origin_for("web", "https://megaloja.com.br"),
+            None
+        );
+    }
+
+    #[test]
+    fn global_wildcard_does_not_allow_arbitrary_cors_origin() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: local
+    path: ./web
+hosts:
+  "*":
+    origin: web
+"#,
+        )
+        .expect("manifest parses");
+        let policy = CorsPolicy::from_manifest(&manifest);
+
+        assert_eq!(
+            policy.allowed_origin_for("web", "https://unrelated.test"),
             None
         );
     }

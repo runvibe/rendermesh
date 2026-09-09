@@ -66,6 +66,7 @@ impl CdnConfig {
         match self {
             Self::CloudFront(config) => config.domains.as_ref(),
             Self::Cloudflare(config) => config.domains.as_ref(),
+            Self::CloudFrontSaas(_) => None,
         }
     }
 }
@@ -105,6 +106,8 @@ pub struct HostConfig {
 pub enum CdnConfig {
     #[serde(rename = "cloudfront")]
     CloudFront(CloudFrontCdnConfig),
+    #[serde(rename = "cloudfront_saas")]
+    CloudFrontSaas(CloudFrontSaasCdnConfig),
     Cloudflare(CloudflareCdnConfig),
 }
 
@@ -128,6 +131,35 @@ pub struct CloudflareCdnConfig {
     #[serde(default)]
     pub url_prefixes: Vec<String>,
     pub domains: Option<CdnDomainConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CloudFrontSaasCdnConfig {
+    pub distribution_id_env: String,
+    pub connection_group_id_env: Option<String>,
+    #[serde(default)]
+    pub strategy: CdnRefreshStrategy,
+    #[serde(default)]
+    pub parameters_env: BTreeMap<String, String>,
+    pub certificate: Option<CloudFrontSaasCertificateConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CloudFrontSaasCertificateConfig {
+    Managed {
+        #[serde(default)]
+        validation_token_host: CloudFrontSaasValidationTokenHost,
+    },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudFrontSaasValidationTokenHost {
+    #[default]
+    #[serde(rename = "cloudfront")]
+    CloudFront,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
