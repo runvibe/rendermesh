@@ -71,7 +71,9 @@ impl CdnPurge for CloudFrontCdnRepository {
 
         Ok(CdnPurgeResult {
             provider: "cloudfront".to_string(),
-            request_id: invalidation.map(|invalidation| invalidation.id().to_string()),
+            request_ids: invalidation
+                .map(|invalidation| vec![invalidation.id().to_string()])
+                .unwrap_or_default(),
             status: invalidation
                 .map(|invalidation| invalidation.status())
                 .unwrap_or("submitted")

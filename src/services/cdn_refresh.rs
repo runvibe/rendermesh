@@ -35,7 +35,7 @@ pub struct OriginCdnRefresh {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CdnRefreshOutcome {
     pub provider: String,
-    pub request_id: Option<String>,
+    pub request_ids: Vec<String>,
     pub status: String,
     pub submitted_items: usize,
     pub changed_count: usize,
@@ -74,9 +74,9 @@ impl OriginCdnRefresh {
                     url_prefixes,
                 })
             }
-            CdnConfig::CloudFrontSaas(_) => Err(anyhow!(
-                "CloudFront SaaS CDN refresh is not implemented"
-            )),
+            CdnConfig::CloudFrontSaas(_) => {
+                Err(anyhow!("CloudFront SaaS CDN refresh is not implemented"))
+            }
         }
     }
 
@@ -101,7 +101,7 @@ impl OriginCdnRefresh {
 
         Ok(Some(CdnRefreshOutcome {
             provider: result.provider,
-            request_id: result.request_id,
+            request_ids: result.request_ids,
             status: result.status,
             submitted_items: result.submitted_items,
             changed_count,

@@ -319,6 +319,7 @@ where
         last_cdn_provider: None,
         last_cdn_status: None,
         last_cdn_request_id: None,
+        last_cdn_request_ids: Vec::new(),
         last_cdn_refreshed_at: None,
         last_cdn_submitted_items: None,
         last_cdn_error: None,
@@ -366,17 +367,21 @@ where
                     changed_count = outcome.changed_count,
                     "cdn refresh submitted"
                 );
+                let request_id = outcome.request_ids.first().cloned();
+                let request_ids = outcome.request_ids.clone();
                 let cdn = OriginSyncCdnResponse {
                     provider: outcome.provider.clone(),
                     status: outcome.status.clone(),
-                    request_id: outcome.request_id.clone(),
+                    request_id: request_id.clone(),
+                    request_ids: request_ids.clone(),
                     submitted_items: outcome.submitted_items,
                 };
                 origin_runtime.set_cdn_result(
                     origin_id,
                     outcome.provider,
                     outcome.status,
-                    outcome.request_id,
+                    request_id,
+                    request_ids,
                     outcome.submitted_items,
                 );
                 Some(cdn)

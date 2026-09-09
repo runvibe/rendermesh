@@ -242,6 +242,7 @@ curl -X POST \
 ```
 
 Manual sync runs the same atomic activation pipeline as startup and background sync. If listing, edge config parsing, or HTML template compilation fails, RenderMesh keeps the previous generation active. If `RENDERMESH_ADMIN_TOKEN` is not set, the endpoint returns `403`.
+When a CDN purge is submitted, the sync response keeps the legacy `request_id` field as the first provider request and also includes `request_ids` with the full submitted request vector.
 
 ## Edge Hook Contract
 

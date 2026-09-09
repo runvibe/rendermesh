@@ -24,7 +24,7 @@ pub enum CdnPurgeMode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CdnPurgeResult {
     pub provider: String,
-    pub request_id: Option<String>,
+    pub request_ids: Vec<String>,
     pub status: String,
     pub submitted_items: usize,
 }

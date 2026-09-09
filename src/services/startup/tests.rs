@@ -712,6 +712,7 @@ hosts:
         assert_eq!(snapshot.last_cdn_provider.as_deref(), Some("cloudflare"));
         assert_eq!(snapshot.last_cdn_status.as_deref(), Some("submitted"));
         assert_eq!(snapshot.last_cdn_request_id.as_deref(), Some("purge-123"));
+        assert_eq!(snapshot.last_cdn_request_ids, vec!["purge-123".to_string()]);
         assert_eq!(snapshot.last_cdn_submitted_items, Some(1));
 
         let requests = server.received_requests().await.expect("requests");

@@ -26,6 +26,7 @@ pub struct OriginSnapshotDebug {
     pub last_cdn_provider: Option<String>,
     pub last_cdn_status: Option<String>,
     pub last_cdn_request_id: Option<String>,
+    pub last_cdn_request_ids: Vec<String>,
     pub last_cdn_refreshed_at: Option<String>,
     pub last_cdn_submitted_items: Option<usize>,
     pub last_cdn_error: Option<String>,
@@ -52,6 +53,7 @@ impl OriginRuntimeStore {
                 last_cdn_provider: previous.last_cdn_provider.clone(),
                 last_cdn_status: previous.last_cdn_status.clone(),
                 last_cdn_request_id: previous.last_cdn_request_id.clone(),
+                last_cdn_request_ids: previous.last_cdn_request_ids.clone(),
                 last_cdn_refreshed_at: previous.last_cdn_refreshed_at.clone(),
                 last_cdn_submitted_items: previous.last_cdn_submitted_items,
                 last_cdn_error: previous.last_cdn_error.clone(),
@@ -94,6 +96,7 @@ impl OriginRuntimeStore {
                         last_cdn_provider: None,
                         last_cdn_status: None,
                         last_cdn_request_id: None,
+                        last_cdn_request_ids: Vec::new(),
                         last_cdn_refreshed_at: None,
                         last_cdn_submitted_items: None,
                         last_cdn_error: None,
@@ -117,6 +120,7 @@ impl OriginRuntimeStore {
         provider: impl Into<String>,
         status: impl Into<String>,
         request_id: Option<String>,
+        request_ids: Vec<String>,
         submitted_items: usize,
     ) {
         if let Some(snapshot) = self
@@ -128,6 +132,7 @@ impl OriginRuntimeStore {
             snapshot.last_cdn_provider = Some(provider.into());
             snapshot.last_cdn_status = Some(status.into());
             snapshot.last_cdn_request_id = request_id;
+            snapshot.last_cdn_request_ids = request_ids;
             snapshot.last_cdn_refreshed_at = Some(chrono::Utc::now().to_rfc3339());
             snapshot.last_cdn_submitted_items = Some(submitted_items);
             snapshot.last_cdn_error = None;
@@ -201,5 +206,76 @@ impl OriginRuntimeStore {
             .expect("origin runtime lock")
             .get(origin_id)
             .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OriginRuntimeStore, OriginSnapshotDebug};
+
+    #[test]
+    fn set_snapshot_preserves_full_cdn_request_history() {
+        let store = OriginRuntimeStore::default();
+        store.set_snapshot(snapshot(1));
+        store.set_cdn_result(
+            "web",
+            "cloudfront_saas",
+            "submitted",
+            Some("INV-1".to_string()),
+            vec!["INV-1".to_string(), "INV-2".to_string()],
+            4,
+        );
+
+        let replacement = OriginSnapshotDebug {
+            generation: 2,
+            activated_at: "2026-09-09T14:05:00Z".to_string(),
+            captured_at: "2026-09-09T14:04:59Z".to_string(),
+            known_files: 8,
+            added_files: 1,
+            modified_files: 2,
+            removed_files: 0,
+            unchanged_files: 5,
+            downloaded_files: 3,
+            ..snapshot(2)
+        };
+        store.set_snapshot(replacement);
+
+        let current = store.get("web").expect("runtime snapshot");
+        assert_eq!(current.last_cdn_request_id.as_deref(), Some("INV-1"));
+        assert_eq!(
+            current.last_cdn_request_ids,
+            vec!["INV-1".to_string(), "INV-2".to_string()]
+        );
+    }
+
+    fn snapshot(generation: u64) -> OriginSnapshotDebug {
+        OriginSnapshotDebug {
+            origin_id: "web".to_string(),
+            generation,
+            activated_at: "2026-09-09T14:00:00Z".to_string(),
+            captured_at: "2026-09-09T13:59:59Z".to_string(),
+            known_files: 7,
+            added_files: 2,
+            modified_files: 0,
+            removed_files: 0,
+            unchanged_files: 5,
+            downloaded_files: 2,
+            last_error: None,
+            last_cdn_provider: None,
+            last_cdn_status: None,
+            last_cdn_request_id: None,
+            last_cdn_request_ids: Vec::new(),
+            last_cdn_refreshed_at: None,
+            last_cdn_submitted_items: None,
+            last_cdn_error: None,
+            last_cdn_domain_provider: None,
+            last_cdn_domain_status: None,
+            last_cdn_domain_reconciled_at: None,
+            last_cdn_domain_added: None,
+            last_cdn_domain_updated: None,
+            last_cdn_domain_removed: None,
+            last_cdn_domain_unchanged: None,
+            last_cdn_domain_error: None,
+        }
     }
 }
