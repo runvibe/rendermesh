@@ -1,11 +1,11 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt, sync::Arc};
 
 use anyhow::{anyhow, Result};
 
 use crate::{
     dto::manifest::{CdnConfig, CdnRefreshStrategy},
     repositories::{
-        cdn::{CdnPurge, CdnPurgeMode, CdnPurgeRepository, CdnPurgeRequest},
+        cdn::{CdnPurge, CdnPurgeFailure, CdnPurgeMode, CdnPurgeRepository, CdnPurgeRequest},
         cloudflare_cdn::CloudflareCdnRepository,
         cloudfront_cdn::CloudFrontCdnRepository,
         cloudfront_saas_cdn::CloudFrontSaasCdnRepository,
@@ -28,7 +28,7 @@ pub enum CdnRefreshMode {
 
 #[derive(Clone)]
 pub struct OriginCdnRefresh {
-    repository: CdnPurgeRepository,
+    repository: Arc<dyn CdnPurge>,
     strategy: CdnRefreshStrategy,
     url_prefixes: Vec<String>,
 }
@@ -42,16 +42,44 @@ pub struct CdnRefreshOutcome {
     pub changed_count: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CdnRefreshFailure {
+    pub provider: String,
+    pub request_ids: Vec<String>,
+    pub submitted_items: usize,
+    message: String,
+}
+
+impl fmt::Display for CdnRefreshFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CdnRefreshFailure {}
+
 impl OriginCdnRefresh {
+    pub(crate) fn with_repository(
+        repository: Arc<dyn CdnPurge>,
+        strategy: CdnRefreshStrategy,
+        url_prefixes: Vec<String>,
+    ) -> Self {
+        Self {
+            repository,
+            strategy,
+            url_prefixes,
+        }
+    }
+
     pub(crate) fn from_cloudfront_saas(
         repository: CloudFrontSaasCdnRepository,
         strategy: CdnRefreshStrategy,
     ) -> Self {
-        Self {
-            repository: CdnPurgeRepository::CloudFrontSaas(repository),
+        Self::with_repository(
+            Arc::new(CdnPurgeRepository::CloudFrontSaas(repository)),
             strategy,
-            url_prefixes: Vec::new(),
-        }
+            Vec::new(),
+        )
     }
 
     pub async fn from_config(
@@ -59,14 +87,14 @@ impl OriginCdnRefresh {
         derived_url_prefixes: Vec<String>,
     ) -> Result<Self> {
         match config {
-            CdnConfig::CloudFront(config) => Ok(Self {
-                repository: CdnPurgeRepository::CloudFront(
+            CdnConfig::CloudFront(config) => Ok(Self::with_repository(
+                Arc::new(CdnPurgeRepository::CloudFront(
                     CloudFrontCdnRepository::from_distribution_id_env(&config.distribution_id_env)
                         .await?,
-                ),
-                strategy: config.strategy.clone(),
-                url_prefixes: Vec::new(),
-            }),
+                )),
+                config.strategy.clone(),
+                Vec::new(),
+            )),
             CdnConfig::Cloudflare(config) => {
                 let url_prefixes = if config.url_prefixes.is_empty() {
                     derived_url_prefixes
@@ -78,13 +106,13 @@ impl OriginCdnRefresh {
                         "Cloudflare changed_paths CDN refresh requires url_prefixes or at least one exact host for the origin"
                     ));
                 }
-                Ok(Self {
-                    repository: CdnPurgeRepository::Cloudflare(
+                Ok(Self::with_repository(
+                    Arc::new(CdnPurgeRepository::Cloudflare(
                         CloudflareCdnRepository::from_config(config)?,
-                    ),
-                    strategy: config.strategy.clone(),
+                    )),
+                    config.strategy.clone(),
                     url_prefixes,
-                })
+                ))
             }
             CdnConfig::CloudFrontSaas(_) => {
                 Err(anyhow!("CloudFront SaaS CDN refresh is not implemented"))
@@ -109,7 +137,8 @@ impl OriginCdnRefresh {
                 generation,
                 mode: purge_mode_from_refresh_mode(plan.mode),
             })
-            .await?;
+            .await
+            .map_err(translate_purge_error)?;
 
         Ok(Some(CdnRefreshOutcome {
             provider: result.provider,
@@ -118,6 +147,21 @@ impl OriginCdnRefresh {
             submitted_items: result.submitted_items,
             changed_count,
         }))
+    }
+}
+
+fn translate_purge_error(error: anyhow::Error) -> anyhow::Error {
+    match error.downcast::<CdnPurgeFailure>() {
+        Ok(failure) => {
+            let message = failure.to_string();
+            anyhow::Error::new(CdnRefreshFailure {
+                provider: failure.provider,
+                request_ids: failure.request_ids,
+                submitted_items: failure.submitted_items,
+                message,
+            })
+        }
+        Err(error) => error,
     }
 }
 
@@ -191,15 +235,60 @@ fn format_url(prefix: &str, path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, sync::Arc};
 
     use crate::{
         dto::manifest::CdnRefreshStrategy,
+        repositories::cdn::{CdnPurge, CdnPurgeFailure, CdnPurgeRequest, CdnPurgeResult},
         services::{
-            cdn_refresh::{build_cdn_refresh_plan, CdnRefreshMode},
+            cdn_refresh::{
+                build_cdn_refresh_plan, CdnRefreshFailure, CdnRefreshMode, OriginCdnRefresh,
+            },
             freshness::OriginFreshnessDiff,
         },
     };
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+
+    struct PartialFanoutPurge;
+
+    #[async_trait]
+    impl CdnPurge for PartialFanoutPurge {
+        async fn purge(&self, _request: CdnPurgeRequest) -> anyhow::Result<CdnPurgeResult> {
+            Err(anyhow!(CdnPurgeFailure {
+                provider: "cloudfront_saas".to_string(),
+                request_ids: vec!["INV-1".to_string()],
+                submitted_items: 2,
+                message: "invalidate tenant-b: service unavailable".to_string(),
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn repository_partial_failure_maps_to_service_owned_error() {
+        let refresh = OriginCdnRefresh {
+            repository: Arc::new(PartialFanoutPurge),
+            strategy: CdnRefreshStrategy::ChangedPaths,
+            url_prefixes: Vec::new(),
+        };
+        let diff = OriginFreshnessDiff {
+            added: BTreeSet::from(["index.html".to_string(), "app.js".to_string()]),
+            ..OriginFreshnessDiff::default()
+        };
+
+        let error = refresh
+            .refresh_after_activation("web", 7, &diff)
+            .await
+            .expect_err("partial fanout must remain a refresh failure");
+        let failure = error
+            .downcast_ref::<CdnRefreshFailure>()
+            .expect("repository failure is translated at the service boundary");
+
+        assert_eq!(failure.provider, "cloudfront_saas");
+        assert_eq!(failure.request_ids, ["INV-1"]);
+        assert_eq!(failure.submitted_items, 2);
+        assert!(failure.to_string().contains("tenant-b"));
+    }
 
     #[test]
     fn changed_paths_strategy_collects_added_modified_and_removed_paths() {

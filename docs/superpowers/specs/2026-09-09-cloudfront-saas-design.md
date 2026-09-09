@@ -226,9 +226,10 @@ The origin runtime debug snapshot follows the same compatibility rule with
 `last_cdn_request_id` and a new `last_cdn_request_ids` field.
 
 If a later tenant invalidation fails after earlier submissions succeeded, the
-sync response and runtime snapshot report `partial_failure` and retain the
-completed invalidation request IDs and submitted item count. The runtime
-snapshot also records the failure in `last_cdn_error`.
+sync response omits `cdn`, preserving the existing post-activation failure
+contract. The runtime snapshot reports `partial_failure`, retains the completed
+invalidation request IDs and submitted item count, and records the failure in
+`last_cdn_error`.
 
 Logs include:
 

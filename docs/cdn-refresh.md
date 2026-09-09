@@ -102,6 +102,9 @@ When RenderMesh finds an existing tenant by domain, it only adopts that tenant w
 - the tenant owns only that single exact host; and
 - any configured managed-certificate validation settings match.
 
+Tenant reconciliation owns the `enabled` state. A matching tenant that is
+explicitly disabled is updated and re-enabled.
+
 RenderMesh preserves provider-side state that it does not manage, including existing AWS customizations. It does not delete extra tenants, and it does not delete tenants for hosts removed from the manifest. `removed` therefore remains `0` for this provider.
 
 ### Invalidation behavior
@@ -119,9 +122,11 @@ Each tenant invalidation reuses the same activated path set, but has its own cal
 - `request_ids`: the complete ordered invalidation id list for every submitted tenant request.
 
 The runtime snapshot follows the same pattern with `last_cdn_request_id` and `last_cdn_request_ids`.
-If a later tenant invalidation fails, the response and runtime snapshot use
-`partial_failure` and retain the request ids and submitted item count from
-tenants completed before the failure; `last_cdn_error` records the failure.
+If a later tenant invalidation fails, the sync response omits `cdn`, as it does
+for other post-activation CDN failures. The runtime snapshot uses
+`partial_failure`, retains the request ids and submitted item count from
+tenants completed before the failure, and records the failure in
+`last_cdn_error`.
 
 ### Managed certificates, DNS, and IAM
 

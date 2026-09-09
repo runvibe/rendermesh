@@ -240,6 +240,10 @@ Unknown fields in the `certificate` block are rejected during manifest parsing.
 
 RenderMesh resolves `distribution_id_env`, `connection_group_id_env`, and every `parameters_env` value during startup. This keeps manifests portable across environments and avoids placing CloudFront identifiers or tenant parameter values directly in source-controlled YAML.
 
+CloudFront SaaS tenant reconciliation owns the `enabled` state. If a matching
+tenant is explicitly disabled, the next reconciliation updates it and
+re-enables it.
+
 ### `cdn.domains`
 
 `cdn.domains` reconciles CDN-facing domains from the global `hosts` map during startup.

@@ -43,6 +43,9 @@ pub struct CdnPurgeFailure {
 
 impl fmt::Display for CdnPurgeFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.request_ids.is_empty() {
+            return formatter.write_str(&self.message);
+        }
         write!(
             formatter,
             "{}; completed invalidation request ids: [{}]",
@@ -168,4 +171,21 @@ pub fn ensure_cloudflare_mode(mode: CdnPurgeMode) -> Result<CloudflarePurgePaylo
 pub enum CloudflarePurgePayload {
     Everything,
     Files(Vec<String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CdnPurgeFailure;
+
+    #[test]
+    fn purge_failure_without_completed_requests_omits_empty_request_id_list() {
+        let failure = CdnPurgeFailure {
+            provider: "cloudfront_saas".to_string(),
+            request_ids: Vec::new(),
+            submitted_items: 0,
+            message: "tenant invalidation failed".to_string(),
+        };
+
+        assert_eq!(failure.to_string(), "tenant invalidation failed");
+    }
 }
