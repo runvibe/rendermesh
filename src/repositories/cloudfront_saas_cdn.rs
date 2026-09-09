@@ -8,10 +8,13 @@ use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_cloudfront::{
     config::Region,
+    operation::RequestId,
     types::{
-        DistributionTenantAssociationFilter, DomainItem, InvalidationBatch,
-        ManagedCertificateRequest as AwsManagedCertificateRequest, Parameter, Paths,
-        ValidationTokenHost,
+        Certificate as AwsCertificate, CustomizationActionType,
+        Customizations as AwsCustomizations, DistributionTenantAssociationFilter, DomainItem,
+        GeoRestrictionCustomization as AwsGeoRestrictionCustomization, GeoRestrictionType,
+        InvalidationBatch, ManagedCertificateRequest as AwsManagedCertificateRequest, Parameter,
+        Paths, ValidationTokenHost, WebAclCustomization as AwsWebAclCustomization,
     },
     Client,
 };
@@ -72,6 +75,7 @@ impl CloudFrontSaasCdnRepository {
 
         DistributionTenant {
             id: existing.id.clone(),
+            name: existing.name.clone(),
             distribution_id: self.config.distribution_id.clone(),
             domains: BTreeSet::from([domain.to_string()]),
             connection_group_id: self
@@ -80,7 +84,8 @@ impl CloudFrontSaasCdnRepository {
                 .clone()
                 .or_else(|| existing.connection_group_id.clone()),
             parameters,
-            enabled: true,
+            customizations: existing.customizations.clone(),
+            enabled: existing.enabled.map(|_| true),
         }
     }
 
@@ -88,16 +93,21 @@ impl CloudFrontSaasCdnRepository {
         &self,
         existing: &DistributionTenant,
         domain: &str,
-        certificate_validation_token_host: Option<&str>,
+        managed_certificate: Option<&ManagedCertificateLookup>,
     ) -> bool {
         let desired = self.merged_tenant(existing, domain);
-        let certificate_matches = self
-            .config
-            .managed_certificate
-            .as_ref()
-            .is_none_or(|request| {
-                certificate_validation_token_host == Some(request.validation_token_host.as_str())
-            });
+        let certificate_matches =
+            self.config.managed_certificate.as_ref().is_none_or(
+                |request| match managed_certificate {
+                    Some(ManagedCertificateLookup::Found {
+                        validation_token_host: Some(existing),
+                    }) => existing == &request.validation_token_host,
+                    Some(ManagedCertificateLookup::Found {
+                        validation_token_host: None,
+                    }) => true,
+                    Some(ManagedCertificateLookup::NotFound) | None => false,
+                },
+            );
 
         existing == &desired && certificate_matches
     }
@@ -109,6 +119,16 @@ impl CloudFrontSaasCdnRepository {
                 tenant.id,
                 tenant.distribution_id,
                 self.config.distribution_id
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_exact_host(&self, tenant: &DistributionTenant, domain: &str) -> Result<()> {
+        if tenant.domains != BTreeSet::from([domain.to_string()]) {
+            return Err(anyhow!(
+                "CloudFront SaaS tenant {} found for desired exact host {domain} also owns other domains; refusing adoption",
+                tenant.id
             ));
         }
         Ok(())
@@ -126,16 +146,18 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
         let mut unchanged = 0;
 
         for domain in request.desired_domains {
-            let existing = self
+            let lookup = self
                 .client
                 .get_distribution_tenant_by_domain(&domain)
                 .await
                 .with_context(|| format!("get CloudFront SaaS tenant for exact domain {domain}"))?;
-            let Some(existing) = existing else {
-                self.client
+            let Some(existing) = lookup.value else {
+                let tenant_name = deterministic_tenant_name(&self.config.distribution_id, &domain);
+                let created = self
+                    .client
                     .create_distribution_tenant(CreateDistributionTenantRequest {
                         distribution_id: self.config.distribution_id.clone(),
-                        name: deterministic_tenant_name(&self.config.distribution_id, &domain),
+                        name: tenant_name.clone(),
                         domains: BTreeSet::from([domain.clone()]),
                         connection_group_id: self.config.connection_group_id.clone(),
                         parameters: self.config.parameters.clone(),
@@ -146,13 +168,22 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
                     .with_context(|| {
                         format!("create CloudFront SaaS tenant for exact domain {domain}")
                     })?;
+                trace_tenant_operation(
+                    "created",
+                    &tenant_name,
+                    &created.value.id,
+                    created.aws_request_id.as_deref(),
+                );
                 added += 1;
                 continue;
             };
 
             self.verify_distribution(&existing, &domain)?;
-            let certificate_validation_token_host = if self.config.managed_certificate.is_some() {
-                self.client
+            self.verify_exact_host(&existing, &domain)?;
+            let mut observation_request_id = lookup.aws_request_id;
+            let managed_certificate = if self.config.managed_certificate.is_some() {
+                let certificate = self
+                    .client
                     .get_managed_certificate_validation_token_host(&existing.id)
                     .await
                     .with_context(|| {
@@ -160,21 +191,25 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
                             "get managed certificate details for CloudFront SaaS tenant {}",
                             existing.id
                         )
-                    })?
+                    })?;
+                observation_request_id = certificate.aws_request_id.or(observation_request_id);
+                Some(certificate.value)
             } else {
                 None
             };
 
-            if self.tenant_matches(
-                &existing,
-                &domain,
-                certificate_validation_token_host.as_deref(),
-            ) {
+            if self.tenant_matches(&existing, &domain, managed_certificate.as_ref()) {
+                trace_tenant_operation(
+                    "unchanged",
+                    &existing.name,
+                    &existing.id,
+                    observation_request_id.as_deref(),
+                );
                 unchanged += 1;
                 continue;
             }
 
-            let current = self
+            let current_response = self
                 .client
                 .get_distribution_tenant(&existing.id)
                 .await
@@ -184,19 +219,25 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
                         existing.id
                     )
                 })?;
+            let current = current_response.value;
             self.verify_distribution(&current.tenant, &domain)?;
-            if self.tenant_matches(
-                &current.tenant,
-                &domain,
-                certificate_validation_token_host.as_deref(),
-            ) {
+            self.verify_exact_host(&current.tenant, &domain)?;
+            if self.tenant_matches(&current.tenant, &domain, managed_certificate.as_ref()) {
+                trace_tenant_operation(
+                    "unchanged",
+                    &current.tenant.name,
+                    &current.tenant.id,
+                    current_response.aws_request_id.as_deref(),
+                );
                 unchanged += 1;
                 continue;
             }
 
-            self.client
+            let current_id = current.tenant.id.clone();
+            let updated_tenant = self
+                .client
                 .update_distribution_tenant(UpdateDistributionTenantRequest {
-                    id: current.tenant.id.clone(),
+                    id: current_id.clone(),
                     if_match: current.etag,
                     tenant: self.merged_tenant(&current.tenant, &domain),
                     managed_certificate: self.config.managed_certificate.clone(),
@@ -208,6 +249,12 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
                         current.tenant.id
                     )
                 })?;
+            trace_tenant_operation(
+                "updated",
+                &updated_tenant.value.name,
+                &updated_tenant.value.id,
+                updated_tenant.aws_request_id.as_deref(),
+            );
             updated += 1;
         }
 
@@ -248,7 +295,7 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
         }
 
         tenants.retain(|tenant| {
-            tenant.enabled
+            tenant.enabled != Some(false)
                 && tenant.distribution_id == self.config.distribution_id
                 && tenant
                     .domains
@@ -274,7 +321,7 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
                 request.origin_id, request.generation, tenant.id
             );
             let tenant_id = tenant.id;
-            let request_id = self
+            let invalidation = self
                 .client
                 .create_invalidation_for_distribution_tenant(TenantInvalidationRequest {
                     tenant_id: tenant_id.clone(),
@@ -283,7 +330,13 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
                 })
                 .await
                 .with_context(|| format!("invalidate CloudFront SaaS tenant {tenant_id}"))?;
-            request_ids.push(request_id);
+            trace_tenant_operation(
+                "invalidated",
+                &tenant.name,
+                &tenant_id,
+                invalidation.aws_request_id.as_deref(),
+            );
+            request_ids.push(invalidation.value);
         }
 
         Ok(CdnPurgeResult {
@@ -298,41 +351,32 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
 pub fn deterministic_tenant_name(distribution_id: &str, host: &str) -> String {
     let digest = Sha256::digest(format!("{distribution_id}\0{host}").as_bytes());
     let hash = format!("{digest:x}");
-    let host_prefix = &host[..host.floor_char_boundary(100.min(host.len()))];
-    let mut name = format!("rendermesh-{host_prefix}-{}", &hash[..16]);
-    name.truncate(name.floor_char_boundary(128.min(name.len())));
-    while name
+    let host_prefix = host
         .chars()
-        .last()
-        .is_some_and(|character| !character.is_ascii_alphanumeric())
-    {
-        name.pop();
-    }
-    name
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(100)
+        .collect::<String>();
+    format!("rendermesh-{host_prefix}-{}", &hash[..16])
 }
 
 fn resolve_tenant_config(config: &CloudFrontSaasCdnConfig) -> Result<CdnTenantConfig> {
-    let distribution_id = std::env::var(&config.distribution_id_env).with_context(|| {
-        format!(
-            "read CloudFront SaaS distribution id env {}",
-            config.distribution_id_env
-        )
-    })?;
+    let distribution_id = read_environment_variable(&config.distribution_id_env)?;
     let connection_group_id = config
         .connection_group_id_env
         .as_ref()
-        .map(|env_name| {
-            std::env::var(env_name)
-                .with_context(|| format!("read CloudFront SaaS connection group id env {env_name}"))
-        })
+        .map(|env_name| read_environment_variable(env_name))
         .transpose()?;
     let parameters = config
         .parameters_env
         .iter()
         .map(|(name, env_name)| {
-            std::env::var(env_name)
-                .with_context(|| format!("read CloudFront SaaS parameter {name} env {env_name}"))
-                .map(|value| (name.clone(), value))
+            read_environment_variable(env_name).map(|value| (name.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let managed_certificate = config
@@ -356,14 +400,43 @@ fn resolve_tenant_config(config: &CloudFrontSaasCdnConfig) -> Result<CdnTenantCo
     })
 }
 
+fn read_environment_variable(name: &str) -> Result<String> {
+    std::env::var(name).map_err(|error| environment_variable_error(name, error))
+}
+
+fn environment_variable_error(name: &str, error: std::env::VarError) -> anyhow::Error {
+    let error_class = match error {
+        std::env::VarError::NotPresent => "NotPresent",
+        std::env::VarError::NotUnicode(_) => "NotUnicode",
+    };
+    anyhow!("environment variable {name}: {error_class}")
+}
+
+fn trace_tenant_operation(
+    action: &'static str,
+    tenant_name: &str,
+    tenant_id: &str,
+    aws_request_id: Option<&str>,
+) {
+    tracing::info!(
+        action,
+        tenant_name,
+        tenant_id,
+        aws_request_id = aws_request_id.unwrap_or("unknown"),
+        "CloudFront SaaS tenant operation"
+    );
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DistributionTenant {
     id: String,
+    name: String,
     distribution_id: String,
     domains: BTreeSet<String>,
     connection_group_id: Option<String>,
     parameters: BTreeMap<String, String>,
-    enabled: bool,
+    customizations: Option<TenantCustomizations>,
+    enabled: Option<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -376,6 +449,39 @@ struct VersionedDistributionTenant {
 struct DistributionTenantPage {
     tenants: Vec<DistributionTenant>,
     next_marker: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CloudFrontResponse<T> {
+    value: T,
+    aws_request_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ManagedCertificateLookup {
+    Found {
+        validation_token_host: Option<String>,
+    },
+    NotFound,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TenantCustomizations {
+    certificate_arn: Option<String>,
+    geo_restrictions: Option<TenantGeoRestrictionCustomization>,
+    web_acl: Option<TenantWebAclCustomization>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TenantGeoRestrictionCustomization {
+    restriction_type: String,
+    locations: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TenantWebAclCustomization {
+    action: String,
+    arn: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -409,15 +515,17 @@ trait CloudFrontSaasClient: Send + Sync {
     async fn get_distribution_tenant_by_domain(
         &self,
         domain: &str,
-    ) -> Result<Option<DistributionTenant>>;
+    ) -> Result<CloudFrontResponse<Option<DistributionTenant>>>;
 
-    async fn get_distribution_tenant(&self, tenant_id: &str)
-        -> Result<VersionedDistributionTenant>;
+    async fn get_distribution_tenant(
+        &self,
+        tenant_id: &str,
+    ) -> Result<CloudFrontResponse<VersionedDistributionTenant>>;
 
     async fn get_managed_certificate_validation_token_host(
         &self,
         tenant_id: &str,
-    ) -> Result<Option<String>>;
+    ) -> Result<CloudFrontResponse<ManagedCertificateLookup>>;
 
     async fn list_distribution_tenants(
         &self,
@@ -428,17 +536,17 @@ trait CloudFrontSaasClient: Send + Sync {
     async fn create_distribution_tenant(
         &self,
         request: CreateDistributionTenantRequest,
-    ) -> Result<DistributionTenant>;
+    ) -> Result<CloudFrontResponse<DistributionTenant>>;
 
     async fn update_distribution_tenant(
         &self,
         request: UpdateDistributionTenantRequest,
-    ) -> Result<DistributionTenant>;
+    ) -> Result<CloudFrontResponse<DistributionTenant>>;
 
     async fn create_invalidation_for_distribution_tenant(
         &self,
         request: TenantInvalidationRequest,
-    ) -> Result<String>;
+    ) -> Result<CloudFrontResponse<String>>;
 }
 
 struct AwsCloudFrontSaasClient {
@@ -450,7 +558,7 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
     async fn get_distribution_tenant_by_domain(
         &self,
         domain: &str,
-    ) -> Result<Option<DistributionTenant>> {
+    ) -> Result<CloudFrontResponse<Option<DistributionTenant>>> {
         let response = self
             .client
             .get_distribution_tenant_by_domain()
@@ -458,19 +566,30 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
             .send()
             .await;
         match response {
-            Ok(response) => response
-                .distribution_tenant()
-                .ok_or_else(|| {
-                    anyhow!("CloudFront get_distribution_tenant_by_domain response missing tenant")
+            Ok(response) => {
+                let aws_request_id = response.request_id().map(ToString::to_string);
+                let tenant = response
+                    .distribution_tenant()
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "CloudFront get_distribution_tenant_by_domain response missing tenant"
+                        )
+                    })
+                    .and_then(distribution_tenant_from_aws)?;
+                Ok(CloudFrontResponse {
+                    value: Some(tenant),
+                    aws_request_id,
                 })
-                .and_then(distribution_tenant_from_aws)
-                .map(Some),
+            }
             Err(error)
                 if error
                     .as_service_error()
                     .is_some_and(|service_error| service_error.is_entity_not_found()) =>
             {
-                Ok(None)
+                Ok(CloudFrontResponse {
+                    value: None,
+                    aws_request_id: error.request_id().map(ToString::to_string),
+                })
             }
             Err(error) => Err(error).with_context(|| {
                 format!("CloudFront get_distribution_tenant_by_domain for domain {domain}")
@@ -481,7 +600,7 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
     async fn get_distribution_tenant(
         &self,
         tenant_id: &str,
-    ) -> Result<VersionedDistributionTenant> {
+    ) -> Result<CloudFrontResponse<VersionedDistributionTenant>> {
         let response = self
             .client
             .get_distribution_tenant()
@@ -491,6 +610,7 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
             .with_context(|| {
                 format!("CloudFront get_distribution_tenant for tenant {tenant_id}")
             })?;
+        let aws_request_id = response.request_id().map(ToString::to_string);
         let tenant = response
             .distribution_tenant()
             .ok_or_else(|| anyhow!("CloudFront get_distribution_tenant response missing tenant"))
@@ -504,13 +624,16 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
             })?
             .to_string();
 
-        Ok(VersionedDistributionTenant { tenant, etag })
+        Ok(CloudFrontResponse {
+            value: VersionedDistributionTenant { tenant, etag },
+            aws_request_id,
+        })
     }
 
     async fn get_managed_certificate_validation_token_host(
         &self,
         tenant_id: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<CloudFrontResponse<ManagedCertificateLookup>> {
         let response = self
             .client
             .get_managed_certificate_details()
@@ -518,16 +641,31 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
             .send()
             .await;
         match response {
-            Ok(response) => Ok(response
-                .managed_certificate_details()
-                .and_then(|details| details.validation_token_host())
-                .map(|host| host.as_str().to_string())),
+            Ok(response) => {
+                let aws_request_id = response.request_id().map(ToString::to_string);
+                let details = response.managed_certificate_details().ok_or_else(|| {
+                    anyhow!(
+                        "CloudFront get_managed_certificate_details response missing details for tenant {tenant_id}"
+                    )
+                })?;
+                Ok(CloudFrontResponse {
+                    value: ManagedCertificateLookup::Found {
+                        validation_token_host: details
+                            .validation_token_host()
+                            .map(|host| host.as_str().to_string()),
+                    },
+                    aws_request_id,
+                })
+            }
             Err(error)
                 if error
                     .as_service_error()
                     .is_some_and(|service_error| service_error.is_entity_not_found()) =>
             {
-                Ok(None)
+                Ok(CloudFrontResponse {
+                    value: ManagedCertificateLookup::NotFound,
+                    aws_request_id: error.request_id().map(ToString::to_string),
+                })
             }
             Err(error) => Err(error).with_context(|| {
                 format!("CloudFront get_managed_certificate_details for tenant {tenant_id}")
@@ -568,7 +706,7 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
     async fn create_distribution_tenant(
         &self,
         request: CreateDistributionTenantRequest,
-    ) -> Result<DistributionTenant> {
+    ) -> Result<CloudFrontResponse<DistributionTenant>> {
         let domains = domain_items(&request.domains)?;
         let parameters = parameters(&request.parameters)?;
         let managed_certificate = request
@@ -594,18 +732,29 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
                     request.name, request.distribution_id
                 )
             })?;
-        response
+        let aws_request_id = response.request_id().map(ToString::to_string);
+        let tenant = response
             .distribution_tenant()
             .ok_or_else(|| anyhow!("CloudFront create_distribution_tenant response missing tenant"))
-            .and_then(distribution_tenant_from_aws)
+            .and_then(distribution_tenant_from_aws)?;
+        Ok(CloudFrontResponse {
+            value: tenant,
+            aws_request_id,
+        })
     }
 
     async fn update_distribution_tenant(
         &self,
         request: UpdateDistributionTenantRequest,
-    ) -> Result<DistributionTenant> {
+    ) -> Result<CloudFrontResponse<DistributionTenant>> {
         let domains = domain_items(&request.tenant.domains)?;
         let parameters = parameters(&request.tenant.parameters)?;
+        let customizations = request
+            .tenant
+            .customizations
+            .as_ref()
+            .map(aws_customizations)
+            .transpose()?;
         let managed_certificate = request
             .managed_certificate
             .as_ref()
@@ -617,10 +766,11 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
             .id(&request.id)
             .distribution_id(&request.tenant.distribution_id)
             .set_domains(Some(domains))
+            .set_customizations(customizations)
             .set_connection_group_id(request.tenant.connection_group_id)
             .set_parameters(Some(parameters))
             .set_managed_certificate_request(managed_certificate)
-            .enabled(request.tenant.enabled)
+            .set_enabled(request.tenant.enabled)
             .if_match(&request.if_match)
             .send()
             .await
@@ -630,16 +780,21 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
                     request.id
                 )
             })?;
-        response
+        let aws_request_id = response.request_id().map(ToString::to_string);
+        let tenant = response
             .distribution_tenant()
             .ok_or_else(|| anyhow!("CloudFront update_distribution_tenant response missing tenant"))
-            .and_then(distribution_tenant_from_aws)
+            .and_then(distribution_tenant_from_aws)?;
+        Ok(CloudFrontResponse {
+            value: tenant,
+            aws_request_id,
+        })
     }
 
     async fn create_invalidation_for_distribution_tenant(
         &self,
         request: TenantInvalidationRequest,
-    ) -> Result<String> {
+    ) -> Result<CloudFrontResponse<String>> {
         let paths = Paths::builder()
             .quantity(request.paths.len() as i32)
             .set_items(Some(request.paths))
@@ -663,7 +818,8 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
                     request.tenant_id
                 )
             })?;
-        response
+        let aws_request_id = response.request_id().map(ToString::to_string);
+        let invalidation_id = response
             .invalidation()
             .map(|invalidation| invalidation.id().to_string())
             .ok_or_else(|| {
@@ -671,7 +827,11 @@ impl CloudFrontSaasClient for AwsCloudFrontSaasClient {
                     "CloudFront create_invalidation_for_distribution_tenant response missing invalidation for tenant {}",
                     request.tenant_id
                 )
-            })
+            })?;
+        Ok(CloudFrontResponse {
+            value: invalidation_id,
+            aws_request_id,
+        })
     }
 }
 
@@ -682,6 +842,10 @@ fn distribution_tenant_from_aws(
         id: tenant
             .id()
             .ok_or_else(|| anyhow!("CloudFront distribution tenant missing ID"))?
+            .to_string(),
+        name: tenant
+            .name()
+            .ok_or_else(|| anyhow!("CloudFront distribution tenant missing name"))?
             .to_string(),
         distribution_id: tenant
             .distribution_id()
@@ -698,7 +862,8 @@ fn distribution_tenant_from_aws(
             .iter()
             .map(|parameter| (parameter.name().to_string(), parameter.value().to_string()))
             .collect(),
-        enabled: tenant.enabled().unwrap_or(false),
+        customizations: tenant.customizations().map(tenant_customizations_from_aws),
+        enabled: tenant.enabled(),
     })
 }
 
@@ -707,6 +872,7 @@ fn distribution_tenant_summary_from_aws(
 ) -> DistributionTenant {
     DistributionTenant {
         id: tenant.id().to_string(),
+        name: tenant.name().to_string(),
         distribution_id: tenant.distribution_id().to_string(),
         domains: tenant
             .domains()
@@ -715,8 +881,72 @@ fn distribution_tenant_summary_from_aws(
             .collect(),
         connection_group_id: tenant.connection_group_id().map(ToString::to_string),
         parameters: BTreeMap::new(),
-        enabled: tenant.enabled().unwrap_or(false),
+        customizations: tenant.customizations().map(tenant_customizations_from_aws),
+        enabled: tenant.enabled(),
     }
+}
+
+fn tenant_customizations_from_aws(customizations: &AwsCustomizations) -> TenantCustomizations {
+    TenantCustomizations {
+        certificate_arn: customizations
+            .certificate()
+            .map(|certificate| certificate.arn().to_string()),
+        geo_restrictions: customizations.geo_restrictions().map(|restrictions| {
+            TenantGeoRestrictionCustomization {
+                restriction_type: restrictions.restriction_type().as_str().to_string(),
+                locations: restrictions.locations.clone(),
+            }
+        }),
+        web_acl: customizations
+            .web_acl()
+            .map(|web_acl| TenantWebAclCustomization {
+                action: web_acl.action().as_str().to_string(),
+                arn: web_acl.arn().map(ToString::to_string),
+            }),
+    }
+}
+
+fn aws_customizations(customizations: &TenantCustomizations) -> Result<AwsCustomizations> {
+    let certificate = customizations
+        .certificate_arn
+        .as_ref()
+        .map(|arn| {
+            AwsCertificate::builder()
+                .arn(arn)
+                .build()
+                .context("build CloudFront SaaS certificate customization")
+        })
+        .transpose()?;
+    let geo_restrictions = customizations
+        .geo_restrictions
+        .as_ref()
+        .map(|restrictions| {
+            AwsGeoRestrictionCustomization::builder()
+                .restriction_type(GeoRestrictionType::from(
+                    restrictions.restriction_type.as_str(),
+                ))
+                .set_locations(restrictions.locations.clone())
+                .build()
+                .context("build CloudFront SaaS geo restriction customization")
+        })
+        .transpose()?;
+    let web_acl = customizations
+        .web_acl
+        .as_ref()
+        .map(|web_acl| {
+            AwsWebAclCustomization::builder()
+                .action(CustomizationActionType::from(web_acl.action.as_str()))
+                .set_arn(web_acl.arn.clone())
+                .build()
+                .context("build CloudFront SaaS web ACL customization")
+        })
+        .transpose()?;
+
+    Ok(AwsCustomizations::builder()
+        .set_certificate(certificate)
+        .set_geo_restrictions(geo_restrictions)
+        .set_web_acl(web_acl)
+        .build())
 }
 
 fn domain_items(domains: &BTreeSet<String>) -> Result<Vec<DomainItem>> {
@@ -756,5 +986,4 @@ fn aws_managed_certificate_request(
 }
 
 #[cfg(test)]
-#[path = "cloudfront_saas_cdn_tests.rs"]
 mod tests;
