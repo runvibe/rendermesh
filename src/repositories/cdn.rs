@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -59,6 +59,33 @@ pub trait CdnDomainReconcile: Send + Sync {
     async fn reconcile_domains(
         &self,
         request: CdnDomainReconcileRequest,
+    ) -> Result<CdnDomainReconcileResult>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnTenantConfig {
+    pub distribution_id: String,
+    pub connection_group_id: Option<String>,
+    pub parameters: BTreeMap<String, String>,
+    pub managed_certificate: Option<ManagedCertificateRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedCertificateRequest {
+    pub validation_token_host: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnTenantReconcileRequest {
+    pub origin_id: String,
+    pub desired_domains: BTreeSet<String>,
+}
+
+#[async_trait]
+pub trait CdnTenantReconcile: Send + Sync {
+    async fn reconcile_tenants(
+        &self,
+        request: CdnTenantReconcileRequest,
     ) -> Result<CdnDomainReconcileResult>;
 }
 

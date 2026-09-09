@@ -1,3 +1,4 @@
+pub mod cdn_tenants;
 pub mod cdn_domains;
 pub mod cdn_refresh;
 pub mod config_format;
