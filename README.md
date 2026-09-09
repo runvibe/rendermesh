@@ -127,9 +127,17 @@ hosts:
     origin: my_app
   "*.myapp.com":
     origin: my_app
+  "*":
+    origin: my_app
 ```
 
-Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
+Host resolution uses this precedence: exact host, most specific domain wildcard,
+then the global `*` fallback. The global wildcard accepts any otherwise-unmatched
+valid host and reports `*` as the matched rule while preserving the incoming
+normalized host. Without `*`, unknown hosts return `421 Misdirected Request`.
+
+The global wildcard affects routing only. It does not allow arbitrary CORS
+origins and is not included in CDN domain reconciliation.
 
 For AWS environments, omit `access_key_id_env` and `secret_access_key_env` to use the AWS SDK default credential chain, including EKS IRSA. For S3-compatible local labs or providers that require static credentials, configure both fields.
 

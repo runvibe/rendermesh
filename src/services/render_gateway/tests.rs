@@ -46,6 +46,54 @@ async fn unknown_host_returns_421() {
 }
 
 #[tokio::test]
+async fn global_wildcard_serves_unknown_host_from_configured_origin() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    write_object(
+        temp.path(),
+        "index.html",
+        "<h1>Fallback</h1>",
+        Some(r#"{"content_type":"text/html"}"#),
+    )
+    .await;
+    let manifest = parse_manifest_yaml(
+        r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  web:
+    type: local
+    path: ./web
+hosts:
+  "*":
+    origin: web
+"#,
+    )
+    .expect("manifest");
+    let service = RenderGatewayService::new_for_tests(
+        HostResolver::new(&manifest).expect("resolver"),
+        CorsPolicy::from_manifest(&manifest),
+        LocalMirrorRepository::new(temp.path().join("origins")),
+        [("web".to_string(), default_edge_config())].into(),
+    );
+
+    let response = service
+        .handle(RenderRequest {
+            host: "unrelated.test".to_string(),
+            ..test_request(Method::GET, "/")
+        })
+        .await
+        .expect("response");
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"<h1>Fallback</h1>")
+    );
+}
+
+#[tokio::test]
 async fn resolved_host_missing_edge_config_returns_500() {
     let temp = tempfile::tempdir().expect("tempdir");
     let manifest = test_manifest();

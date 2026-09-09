@@ -259,7 +259,40 @@ hosts:
     origin: my_app
 ```
 
-Exact hosts take priority over wildcard hosts. Unknown hosts return `421 Misdirected Request`.
+Global fallback:
+
+```yaml
+hosts:
+  "*":
+    origin: my_app
+```
+
+Rules can be combined:
+
+```yaml
+hosts:
+  admin.myapp.com:
+    origin: admin
+  "*.myapp.com":
+    origin: tenant
+  "*":
+    origin: default_app
+```
+
+Resolution uses the following precedence:
+
+```text
+exact host -> most specific domain wildcard -> global * fallback
+```
+
+The global fallback matches only syntactically valid incoming hosts. The
+resolved request preserves the normalized incoming host and identifies `*` as
+the matched manifest rule. Missing or invalid hosts remain unresolved. When no
+global fallback is configured, unknown hosts return `421 Misdirected Request`.
+
+The global wildcard affects routing only. It does not allow arbitrary CORS
+origins and is excluded from CDN domain reconciliation regardless of
+`include_wildcards`.
 
 ## Local Lab Manifest
 
