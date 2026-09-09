@@ -74,6 +74,11 @@ impl OriginCdnDomains {
                     ));
                 }
             },
+            CdnConfig::CloudFrontSaas(_) => {
+                return Err(anyhow!(
+                    "CloudFront SaaS domain reconciliation is not implemented"
+                ));
+            }
         };
 
         Ok(Some(Self {

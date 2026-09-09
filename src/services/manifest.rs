@@ -238,9 +238,43 @@ fn validate_cdn_config(origin_id: &str, cdn: Option<&CdnConfig>) -> Result<()> {
             }
             validate_cdn_domain_config(origin_id, config.domains.as_ref(), false)?;
         }
+        Some(CdnConfig::CloudFrontSaas(config)) => {
+            validate_cloudfront_saas_cdn_config(origin_id, config)?;
+        }
         None => {}
     }
 
+    Ok(())
+}
+
+fn validate_cloudfront_saas_cdn_config(
+    origin_id: &str,
+    config: &crate::dto::manifest::CloudFrontSaasCdnConfig,
+) -> Result<()> {
+    if config.distribution_id_env.trim().is_empty() {
+        return Err(anyhow!(
+            "origin {origin_id} cdn.distribution_id_env is required"
+        ));
+    }
+    if let Some(connection_group_id_env) = config.connection_group_id_env.as_deref() {
+        if connection_group_id_env.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.connection_group_id_env is required"
+            ));
+        }
+    }
+    for (parameter_name, parameter_env) in &config.parameters_env {
+        if parameter_name.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.parameters_env.<empty> is required"
+            ));
+        }
+        if parameter_env.trim().is_empty() {
+            return Err(anyhow!(
+                "origin {origin_id} cdn.parameters_env.{parameter_name} is required"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -527,6 +561,260 @@ hosts:
             }
             other => panic!("expected s3 origin, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_cloudfront_saas_cdn_config() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_DISTRIBUTION_ID
+      connection_group_id_env: APP_CLOUDFRONT_CONNECTION_GROUP_ID
+      strategy: changed_paths
+      parameters_env:
+        origin-domain: APP_CLOUDFRONT_ORIGIN_DOMAIN
+      certificate:
+        mode: managed
+        validation_token_host: cloudfront
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect("manifest parses");
+
+        match &manifest.origins["app"] {
+            OriginConfig::S3(origin) => match origin
+                .cdn
+                .as_ref()
+                .expect("cloudfront saas cdn config")
+            {
+                crate::dto::manifest::CdnConfig::CloudFrontSaas(config) => {
+                    assert_eq!(
+                        config.distribution_id_env,
+                        "APP_CLOUDFRONT_DISTRIBUTION_ID"
+                    );
+                    assert_eq!(
+                        config.connection_group_id_env.as_deref(),
+                        Some("APP_CLOUDFRONT_CONNECTION_GROUP_ID")
+                    );
+                    assert_eq!(config.strategy, crate::dto::manifest::CdnRefreshStrategy::ChangedPaths);
+                    assert_eq!(
+                        config.parameters_env,
+                        std::collections::BTreeMap::from([(
+                            "origin-domain".to_string(),
+                            "APP_CLOUDFRONT_ORIGIN_DOMAIN".to_string()
+                        )])
+                    );
+                    match config.certificate.as_ref().expect("certificate config") {
+                        crate::dto::manifest::CloudFrontSaasCertificateConfig::Managed {
+                            validation_token_host,
+                        } => {
+                            assert_eq!(
+                                validation_token_host,
+                                &crate::dto::manifest::CloudFrontSaasValidationTokenHost::CloudFront
+                            );
+                        }
+                    }
+                }
+                other => panic!("expected cloudfront saas cdn, got {other:?}"),
+            },
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cloudfront_saas_defaults_and_optional_certificate() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_DISTRIBUTION_ID
+      certificate:
+        mode: managed
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect("manifest parses");
+
+        match &manifest.origins["app"] {
+            OriginConfig::S3(origin) => match origin
+                .cdn
+                .as_ref()
+                .expect("cloudfront saas cdn config")
+            {
+                crate::dto::manifest::CdnConfig::CloudFrontSaas(config) => {
+                    assert_eq!(config.strategy, crate::dto::manifest::CdnRefreshStrategy::ChangedPaths);
+                    assert!(config.parameters_env.is_empty());
+                    assert!(config.connection_group_id_env.is_none());
+                    match config.certificate.as_ref().expect("certificate config") {
+                        crate::dto::manifest::CloudFrontSaasCertificateConfig::Managed {
+                            validation_token_host,
+                        } => {
+                            assert_eq!(
+                                validation_token_host,
+                                &crate::dto::manifest::CloudFrontSaasValidationTokenHost::CloudFront
+                            );
+                        }
+                    }
+                }
+                other => panic!("expected cloudfront saas cdn, got {other:?}"),
+            },
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_cloudfront_saas_without_certificate() {
+        let manifest = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_DISTRIBUTION_ID
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect("manifest parses");
+
+        match &manifest.origins["app"] {
+            OriginConfig::S3(origin) => match origin
+                .cdn
+                .as_ref()
+                .expect("cloudfront saas cdn config")
+            {
+                crate::dto::manifest::CdnConfig::CloudFrontSaas(config) => {
+                    assert!(config.certificate.is_none());
+                }
+                other => panic!("expected cloudfront saas cdn, got {other:?}"),
+            },
+            other => panic!("expected s3 origin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_cloudfront_saas_distribution_id_env() {
+        let error = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: " "
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect_err("empty distribution id env is rejected");
+
+        assert!(error
+            .to_string()
+            .contains("cdn.distribution_id_env is required"));
+    }
+
+    #[test]
+    fn rejects_empty_cloudfront_saas_parameter_env_value() {
+        let error = parse_manifest_yaml(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_DISTRIBUTION_ID
+      parameters_env:
+        origin-domain: " "
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect_err("empty parameter env value is rejected");
+
+        assert!(error
+            .to_string()
+            .contains("cdn.parameters_env.origin-domain is required"));
+    }
+
+    #[test]
+    fn rejects_unknown_cloudfront_saas_validation_token_host() {
+        let error = serde_norway::from_str::<crate::dto::manifest::RenderMeshManifest>(
+            r#"
+version: 1
+runtime:
+  local_store_dir: ./var/rendermesh/origins
+  sync_interval_seconds: 60
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_DISTRIBUTION_ID
+      certificate:
+        mode: managed
+        validation_token_host: self_hosted
+hosts:
+  app.test:
+    origin: app
+"#,
+        )
+        .expect_err("self_hosted validation token host is rejected");
+
+        assert!(error.to_string().contains("unknown variant"));
+        assert!(error.to_string().contains("self_hosted"));
     }
 
     #[test]

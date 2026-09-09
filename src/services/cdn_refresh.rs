@@ -74,6 +74,9 @@ impl OriginCdnRefresh {
                     url_prefixes,
                 })
             }
+            CdnConfig::CloudFrontSaas(_) => Err(anyhow!(
+                "CloudFront SaaS CDN refresh is not implemented"
+            )),
         }
     }
 
