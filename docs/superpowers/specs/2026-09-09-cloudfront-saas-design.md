@@ -303,8 +303,9 @@ startup/route -> dto -> service -> repository -> AWS SDK
   their operation and tenant context.
 - Origin activation remains successful when a post-activation invalidation
   fails.
-- Initial startup still fails when tenant reconciliation fails, matching
-  current domain-reconciliation startup behavior.
+- Initial startup continues when tenant reconciliation fails, matching current
+  domain-reconciliation behavior, and records the error in the origin runtime
+  snapshot.
 
 ## IAM permissions
 
