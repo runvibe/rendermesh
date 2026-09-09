@@ -16,10 +16,9 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - External edge APIs can influence rendering through a stable HTTP contract.
 - HTML templates are compiled in memory and rendered only when edge params are returned.
 - Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
-- CDN refresh can purge CloudFront or Cloudflare after a new origin generation is activated.
+- CDN refresh can purge CloudFront, CloudFront SaaS tenants, or Cloudflare after a new origin generation is activated.
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
-- Provider-neutral tenant orchestration derives exact hosts per origin for SaaS-style CDN reconciliation.
-- CloudFront SaaS tenant reconciliation adopts only single-domain exact-host tenants, preserves existing AWS customizations, and treats omitted optional state conservatively.
+- `cloudfront_saas` automatically reconciles one single-domain tenant per exact host, preserves existing AWS customizations, and submits one tenant-specific invalidation per matching tenant that is not explicitly disabled after activation.
 - Startup shares one CloudFront SaaS repository between refresh and tenant reconciliation; reconciliation follows initial activation, so the first purge may report `skipped_no_tenants`.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - Authorized operators can force an immediate per-origin sync without restarting the service.
@@ -37,7 +36,7 @@ This repository contains the RenderMesh MVP. It intentionally does not include P
 - [Edge Hooks](docs/edge-hooks.md): HTTP middleware contract, `{ context, request }` payload, response payloads, status behavior, and headers.
 - [Edge Context](docs/edge-context.md): origin-level custom context sent to edge hooks.
 - [Local Mirror And Sync](docs/local-mirror-and-sync.md): startup sync, background sync, freshness index, local filesystem layout, CDN refresh, and refresh behavior.
-- [CDN Refresh](docs/cdn-refresh.md): CloudFront and Cloudflare purge configuration and lifecycle.
+- [CDN Refresh](docs/cdn-refresh.md): CloudFront, CloudFront SaaS tenant, and Cloudflare purge configuration and lifecycle.
 - [Templates](docs/templates.md): HTML-only Handlebars compilation, in-memory registry, and render rules.
 - [Observability](docs/observability.md): OpenTelemetry setup, span names, important fields, and local Jaeger usage.
 - [Testing](docs/testing.md): unit tests, integration tests, manual local lab, and useful curl flows.

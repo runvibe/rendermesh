@@ -25,6 +25,7 @@ S3 origins reference storage connection settings by environment variable name:
 - Optional secret access key: for example `MY_APP_SECRET_ACCESS_KEY`.
 - Optional force path style flag: for example `MY_APP_FORCE_PATH_STYLE`.
 - Optional CloudFront distribution id: for example `MY_APP_CLOUDFRONT_DISTRIBUTION_ID`.
+- Optional CloudFront SaaS distribution id and connection group id: for example `MY_APP_CLOUDFRONT_MULTI_TENANT_DISTRIBUTION_ID` and `MY_APP_CLOUDFRONT_CONNECTION_GROUP_ID`.
 - Optional Cloudflare zone id and API token: for example `MY_APP_CLOUDFLARE_ZONE_ID` and `MY_APP_CLOUDFLARE_API_TOKEN`.
 
 Truth values for `force_path_style` are `1`, `true`, `yes`, and `on`. False values are `0`, `false`, `no`, and `off`.
@@ -181,17 +182,61 @@ origins:
         - https://docs.example.com
 ```
 
+CloudFront SaaS:
+
+```yaml
+origins:
+  app:
+    type: s3
+    bucket: app-assets
+    endpoint_env: APP_STORAGE_ENDPOINT
+    region_env: APP_STORAGE_REGION
+    cdn:
+      provider: cloudfront_saas
+      distribution_id_env: APP_CLOUDFRONT_MULTI_TENANT_DISTRIBUTION_ID
+      connection_group_id_env: APP_CLOUDFRONT_CONNECTION_GROUP_ID
+      strategy: changed_paths
+      parameters_env:
+        origin-domain: APP_CLOUDFRONT_ORIGIN_DOMAIN
+      certificate:
+        mode: managed
+        validation_token_host: cloudfront
+```
+
 Fields:
 
-- `provider`: `cloudfront` or `cloudflare`.
+- `provider`: `cloudfront`, `cloudfront_saas`, or `cloudflare`.
 - `strategy`: `changed_paths` or `all`. Defaults to `changed_paths`.
 - `distribution_id_env`: CloudFront distribution id env var.
+- `connection_group_id_env`: Optional CloudFront SaaS connection group id env var. When omitted, CloudFront uses the distribution's default connection group.
+- `parameters_env`: Optional CloudFront SaaS map of tenant parameter names to environment variable names. RenderMesh resolves the environment variables during startup and passes the resulting values to CloudFront.
+- `certificate`: Optional CloudFront SaaS tenant certificate block. When omitted, the tenant inherits the multi-tenant distribution certificate behavior.
+- `validation_token_host`: CloudFront SaaS managed-certificate validation host. Defaults to `cloudfront`.
 - `zone_id_env`: Cloudflare zone id env var.
 - `api_token_env`: Cloudflare API token env var.
 - `url_prefixes`: Optional Cloudflare URL prefixes. When omitted, RenderMesh derives `https://<host>` from exact host mappings for the origin.
 - `api_base_env`: Optional Cloudflare API base env var for tests or compatible proxies.
 
 `changed_paths` invalidates added, modified, and removed paths from the freshness diff. `all` purges the whole configured CDN cache scope when a refresh has any changes.
+
+### `cdn.provider: cloudfront_saas`
+
+Use `cloudfront_saas` when one RenderMesh origin should drive CloudFront SaaS Manager tenants instead of a standard distribution alias list. This provider is separate from `cdn.domains`: it derives tenants from exact `hosts` entries and never creates tenants from wildcard rules.
+
+Fields are resolved through environment-variable indirection. Any field ending in `_env` contains the name of an environment variable, not the distribution id, connection group id, or parameter value itself.
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `provider` | Yes | None | Must be `cloudfront_saas`. |
+| `distribution_id_env` | Yes | None | Names the environment variable containing the multi-tenant distribution id. Startup fails if the field is blank or the referenced variable is missing. |
+| `connection_group_id_env` | No | CloudFront distribution default connection group | Names the environment variable containing the connection group id. If present, the field itself must be non-empty and the referenced variable must resolve at startup. |
+| `strategy` | No | `changed_paths` | `changed_paths` invalidates changed paths only. `all` invalidates `/*` when the generation has changes. |
+| `parameters_env` | No | Empty map | Each key is the literal CloudFront tenant parameter name. Each value is the name of an environment variable whose resolved value is sent to CloudFront. Blank parameter names or blank env-var names are rejected. |
+| `certificate` | No | Inherit the multi-tenant distribution certificate behavior | When omitted, RenderMesh does not send a tenant certificate request and CloudFront keeps the inherited certificate behavior. |
+| `certificate.mode` | Yes, when `certificate` is present | None | Only `managed` is implemented. |
+| `certificate.validation_token_host` | No, when `certificate.mode` is `managed` | `cloudfront` | Only `cloudfront` is supported. `self_hosted` is not implemented. |
+
+RenderMesh resolves `distribution_id_env`, `connection_group_id_env`, and every `parameters_env` value during startup. This keeps manifests portable across environments and avoids placing CloudFront identifiers or tenant parameter values directly in source-controlled YAML.
 
 ### `cdn.domains`
 

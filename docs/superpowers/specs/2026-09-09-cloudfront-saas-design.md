@@ -117,7 +117,7 @@ Fields:
 - `certificate.validation_token_host` supports `cloudfront` in the first
   release and defaults to `cloudfront`.
 
-`self-hosted` validation is rejected during manifest validation because
+`self-hosted` validation is rejected during manifest parsing because
 RenderMesh does not serve the CloudFront validation token endpoint.
 
 The contract intentionally does not reuse the standard CloudFront `domains`
@@ -192,8 +192,8 @@ After every successful origin generation activation:
 
 1. Build the invalidation path plan with the existing strategy.
 2. List distribution tenants for the configured multi-tenant distribution.
-3. Select enabled tenants whose domains equal the origin's normalized exact
-   hosts.
+3. Select tenants whose domains equal the origin's normalized exact hosts and
+   whose `enabled` state is not explicitly `false`.
 4. Submit one `CreateInvalidationForDistributionTenant` request per selected
    tenant.
 5. Use the existing deterministic caller reference per generation, extended
@@ -249,9 +249,10 @@ sensitive origin information.
 - `CloudFrontSaasCertificateConfig`; and
 - an enum for managed certificate validation.
 
-DTO validation rejects empty environment-variable names, unsupported
-self-hosted validation, and configuration fields that do not apply to the
-selected certificate mode.
+Manifest parsing and validation reject empty environment-variable names.
+Unsupported `self_hosted` validation is rejected during enum deserialization
+before runtime validation, and configuration fields that do not apply to the
+selected certificate mode remain rejected by the tagged enum shape.
 
 ### Repositories
 
@@ -264,13 +265,13 @@ model conversion:
 - CloudFront error classification needed to distinguish not-found from
   transport or authorization failures.
 
-It implements provider-neutral purge and domain-reconciliation interfaces. The
+It implements provider-neutral purge and tenant-reconciliation interfaces. The
 standard `cloudfront_cdn.rs` adapter remains unchanged except for adopting the
 new multi-request result shape.
 
 ### Services
 
-`src/services/cdn_domains.rs` derives SaaS desired tenants from exact hosts
+`src/services/cdn_tenants.rs` derives SaaS desired tenants from exact hosts
 only and orchestrates reconciliation through the repository interface.
 
 `src/services/cdn_refresh.rs` retains path planning and delegates a single
