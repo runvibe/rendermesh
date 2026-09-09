@@ -366,17 +366,23 @@ pub fn deterministic_tenant_name(distribution_id: &str, host: &str) -> String {
 }
 
 fn resolve_tenant_config(config: &CloudFrontSaasCdnConfig) -> Result<CdnTenantConfig> {
-    let distribution_id = read_environment_variable(&config.distribution_id_env)?;
+    let distribution_id = read_environment_variable(&config.distribution_id_env)
+        .context("resolve CloudFront SaaS cdn.distribution_id_env")?;
     let connection_group_id = config
         .connection_group_id_env
         .as_ref()
-        .map(|env_name| read_environment_variable(env_name))
+        .map(|env_name| {
+            read_environment_variable(env_name)
+                .context("resolve CloudFront SaaS cdn.connection_group_id_env")
+        })
         .transpose()?;
     let parameters = config
         .parameters_env
         .iter()
         .map(|(name, env_name)| {
-            read_environment_variable(env_name).map(|value| (name.clone(), value))
+            read_environment_variable(env_name)
+                .with_context(|| format!("resolve CloudFront SaaS cdn.parameters_env.{name}"))
+                .map(|value| (name.clone(), value))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
     let managed_certificate = config

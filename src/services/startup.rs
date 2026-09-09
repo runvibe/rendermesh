@@ -58,6 +58,7 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         &manifest,
         &origin_refresh,
         &startup_cdn.domains_by_origin,
+        &startup_cdn.tenants_by_origin,
         &origin_runtime,
     )
     .await?;
@@ -80,7 +81,6 @@ pub async fn build_render_runtime(manifest_path: &str) -> Result<RenderRuntime> 
         origin_refresh,
     })
 }
-
 
 #[cfg(test)]
 mod tests;

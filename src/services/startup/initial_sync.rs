@@ -6,17 +6,19 @@ use crate::{
     dto::manifest::RenderMeshManifest,
     services::{
         cdn_domains::OriginCdnDomains,
+        cdn_tenants::OriginCdnTenants,
         origin_refresh::{OriginRefreshError, OriginRefreshService, OriginRefreshTrigger},
         origin_runtime::OriginRuntimeStore,
     },
 };
 
-use super::cdn::reconcile_origin_cdn_domains;
+use super::cdn::{reconcile_origin_cdn_domains, reconcile_origin_cdn_tenants};
 
 pub(super) async fn sync_origins_at_startup(
     manifest: &RenderMeshManifest,
     origin_refresh: &OriginRefreshService,
     cdn_domains_by_origin: &BTreeMap<String, OriginCdnDomains>,
+    cdn_tenants_by_origin: &BTreeMap<String, OriginCdnTenants>,
     origin_runtime: &OriginRuntimeStore,
 ) -> Result<()> {
     for origin_id in manifest.origins.keys() {
@@ -31,6 +33,9 @@ pub(super) async fn sync_origins_at_startup(
         );
         if let Some(cdn_domains) = cdn_domains_by_origin.get(origin_id) {
             reconcile_origin_cdn_domains(origin_id, manifest, cdn_domains, origin_runtime).await;
+        }
+        if let Some(cdn_tenants) = cdn_tenants_by_origin.get(origin_id) {
+            reconcile_origin_cdn_tenants(origin_id, manifest, cdn_tenants, origin_runtime).await;
         }
     }
 

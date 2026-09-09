@@ -20,6 +20,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
 - Provider-neutral tenant orchestration derives exact hosts per origin for SaaS-style CDN reconciliation.
 - CloudFront SaaS tenant reconciliation adopts only single-domain exact-host tenants, preserves existing AWS customizations, and treats omitted optional state conservatively.
+- Startup shares one CloudFront SaaS repository between refresh and tenant reconciliation; reconciliation follows initial activation, so the first purge may report `skipped_no_tenants`.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - Authorized operators can force an immediate per-origin sync without restarting the service.
 - OpenTelemetry spans make the request lifecycle observable from entrypoint to response.

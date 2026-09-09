@@ -8,6 +8,7 @@ use crate::{
         cdn::{CdnPurge, CdnPurgeMode, CdnPurgeRepository, CdnPurgeRequest},
         cloudflare_cdn::CloudflareCdnRepository,
         cloudfront_cdn::CloudFrontCdnRepository,
+        cloudfront_saas_cdn::CloudFrontSaasCdnRepository,
     },
     services::freshness::OriginFreshnessDiff,
 };
@@ -42,6 +43,17 @@ pub struct CdnRefreshOutcome {
 }
 
 impl OriginCdnRefresh {
+    pub(crate) fn from_cloudfront_saas(
+        repository: CloudFrontSaasCdnRepository,
+        strategy: CdnRefreshStrategy,
+    ) -> Self {
+        Self {
+            repository: CdnPurgeRepository::CloudFrontSaas(repository),
+            strategy,
+            url_prefixes: Vec::new(),
+        }
+    }
+
     pub async fn from_config(
         config: &CdnConfig,
         derived_url_prefixes: Vec<String>,
