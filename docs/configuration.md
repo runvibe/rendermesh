@@ -236,6 +236,8 @@ Fields are resolved through environment-variable indirection. Any field ending i
 | `certificate.mode` | Yes, when `certificate` is present | None | Only `managed` is implemented. |
 | `certificate.validation_token_host` | No, when `certificate.mode` is `managed` | `cloudfront` | Only `cloudfront` is supported. `self_hosted` is not implemented. |
 
+Unknown fields in the `certificate` block are rejected during manifest parsing.
+
 RenderMesh resolves `distribution_id_env`, `connection_group_id_env`, and every `parameters_env` value during startup. This keeps manifests portable across environments and avoids placing CloudFront identifiers or tenant parameter values directly in source-controlled YAML.
 
 ### `cdn.domains`

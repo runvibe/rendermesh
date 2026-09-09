@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -29,6 +32,27 @@ pub struct CdnPurgeResult {
     pub status: String,
     pub submitted_items: usize,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CdnPurgeFailure {
+    pub provider: String,
+    pub request_ids: Vec<String>,
+    pub submitted_items: usize,
+    pub message: String,
+}
+
+impl fmt::Display for CdnPurgeFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}; completed invalidation request ids: [{}]",
+            self.message,
+            self.request_ids.join(", ")
+        )
+    }
+}
+
+impl std::error::Error for CdnPurgeFailure {}
 
 #[async_trait]
 pub trait CdnPurge: Send + Sync {

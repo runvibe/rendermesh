@@ -1,6 +1,6 @@
-pub mod cdn_tenants;
 pub mod cdn_domains;
 pub mod cdn_refresh;
+pub mod cdn_tenants;
 pub mod config_format;
 pub mod cors;
 pub mod echo;

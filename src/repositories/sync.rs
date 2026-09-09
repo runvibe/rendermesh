@@ -568,6 +568,5 @@ fn relative_key(origin_dir: &Path, object_path: &Path) -> Result<String> {
     normalize_remote_key(&key)
 }
 
-
 #[cfg(test)]
 mod tests;

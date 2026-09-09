@@ -11,8 +11,8 @@ use tracing::Instrument;
 use crate::{
     dto::origin_sync::{OriginSyncCdnResponse, OriginSyncResponse},
     repositories::{
-        local_mirror::LocalMirrorRepository, origin_storage::OriginStorageRepository,
-        sync::MirrorSyncService, sync::RemoteStorage,
+        cdn::CdnPurgeFailure, local_mirror::LocalMirrorRepository,
+        origin_storage::OriginStorageRepository, sync::MirrorSyncService, sync::RemoteStorage,
     },
     services::{
         cdn_refresh::OriginCdnRefresh,
@@ -395,13 +395,34 @@ where
                 None
             }
             Err(error) => {
+                let partial_response = error
+                    .downcast_ref::<CdnPurgeFailure>()
+                    .filter(|failure| !failure.request_ids.is_empty())
+                    .map(|failure| {
+                        let request_id = failure.request_ids.first().cloned();
+                        origin_runtime.set_cdn_result(
+                            origin_id,
+                            failure.provider.clone(),
+                            "partial_failure",
+                            request_id.clone(),
+                            failure.request_ids.clone(),
+                            failure.submitted_items,
+                        );
+                        OriginSyncCdnResponse {
+                            provider: failure.provider.clone(),
+                            status: "partial_failure".to_string(),
+                            request_id,
+                            request_ids: failure.request_ids.clone(),
+                            submitted_items: failure.submitted_items,
+                        }
+                    });
                 origin_runtime.set_cdn_error(origin_id, error.to_string());
                 tracing::error!(
                     origin = %origin_id,
                     generation = next_generation,
                     "cdn refresh failed after origin activation: {error}"
                 );
-                None
+                partial_response
             }
         }
     } else {

@@ -25,8 +25,9 @@ use crate::{
         CloudFrontSaasCdnConfig, CloudFrontSaasCertificateConfig, CloudFrontSaasValidationTokenHost,
     },
     repositories::cdn::{
-        ensure_paths_mode, CdnDomainReconcileResult, CdnPurge, CdnPurgeRequest, CdnPurgeResult,
-        CdnTenantConfig, CdnTenantReconcile, CdnTenantReconcileRequest, ManagedCertificateRequest,
+        ensure_paths_mode, CdnDomainReconcileResult, CdnPurge, CdnPurgeFailure, CdnPurgeRequest,
+        CdnPurgeResult, CdnTenantConfig, CdnTenantReconcile, CdnTenantReconcileRequest,
+        ManagedCertificateRequest,
     },
 };
 
@@ -329,7 +330,12 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
                     paths: paths.clone(),
                 })
                 .await
-                .with_context(|| format!("invalidate CloudFront SaaS tenant {tenant_id}"))?;
+                .map_err(|error| CdnPurgeFailure {
+                    provider: "cloudfront_saas".to_string(),
+                    submitted_items: paths.len() * request_ids.len(),
+                    request_ids: request_ids.clone(),
+                    message: format!("invalidate CloudFront SaaS tenant {tenant_id}: {error:#}"),
+                })?;
             trace_tenant_operation(
                 "invalidated",
                 &tenant.name,
@@ -347,7 +353,6 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
         })
     }
 }
-
 pub fn deterministic_tenant_name(distribution_id: &str, host: &str) -> String {
     let digest = Sha256::digest(format!("{distribution_id}\0{host}").as_bytes());
     let hash = format!("{digest:x}");
@@ -364,7 +369,6 @@ pub fn deterministic_tenant_name(distribution_id: &str, host: &str) -> String {
         .collect::<String>();
     format!("rendermesh-{host_prefix}-{}", &hash[..16])
 }
-
 fn resolve_tenant_config(config: &CloudFrontSaasCdnConfig) -> Result<CdnTenantConfig> {
     let distribution_id = read_environment_variable(&config.distribution_id_env)
         .context("resolve CloudFront SaaS cdn.distribution_id_env")?;

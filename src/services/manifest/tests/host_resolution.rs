@@ -1,8 +1,8 @@
 use super::*;
-    #[test]
-    fn exact_host_wins_over_wildcard() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn exact_host_wins_over_wildcard() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -28,23 +28,22 @@ hosts:
   "*.megaloja.com.br":
     origin: web
 "#,
-        )
-        .expect("manifest parses");
+    )
+    .expect("manifest parses");
 
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-        let resolved = resolver
-            .resolve("ADMIN.megaloja.com.br:443")
-            .expect("host resolves");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    let resolved = resolver
+        .resolve("ADMIN.megaloja.com.br:443")
+        .expect("host resolves");
 
-        assert_eq!(resolved.origin_id, "admin");
-        assert_eq!(resolved.matched_host, "admin.megaloja.com.br");
-    }
+    assert_eq!(resolved.origin_id, "admin");
+    assert_eq!(resolved.matched_host, "admin.megaloja.com.br");
+}
 
-
-    #[test]
-    fn most_specific_wildcard_wins() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn most_specific_wildcard_wins() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -70,31 +69,29 @@ hosts:
   "*.admin.megaloja.com.br":
     origin: narrow
 "#,
-        )
-        .expect("manifest parses");
+    )
+    .expect("manifest parses");
 
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-        let resolved = resolver
-            .resolve("x.admin.megaloja.com.br")
-            .expect("host resolves");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    let resolved = resolver
+        .resolve("x.admin.megaloja.com.br")
+        .expect("host resolves");
 
-        assert_eq!(resolved.origin_id, "narrow");
-    }
+    assert_eq!(resolved.origin_id, "narrow");
+}
 
+#[test]
+fn unknown_host_is_none() {
+    let manifest = parse_manifest_yaml(sample_manifest()).expect("manifest parses");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
 
-    #[test]
-    fn unknown_host_is_none() {
-        let manifest = parse_manifest_yaml(sample_manifest()).expect("manifest parses");
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    assert!(resolver.resolve("unknown.test").is_none());
+}
 
-        assert!(resolver.resolve("unknown.test").is_none());
-    }
-
-
-    #[test]
-    fn global_wildcard_resolves_unknown_valid_host() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn global_wildcard_resolves_unknown_valid_host() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -109,24 +106,23 @@ hosts:
   "*":
     origin: fallback
 "#,
-        )
-        .expect("manifest parses");
+    )
+    .expect("manifest parses");
 
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
-        let resolved = resolver
-            .resolve("UNRELATED.test:8443")
-            .expect("global wildcard resolves");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    let resolved = resolver
+        .resolve("UNRELATED.test:8443")
+        .expect("global wildcard resolves");
 
-        assert_eq!(resolved.normalized_host, "unrelated.test");
-        assert_eq!(resolved.matched_host, "*");
-        assert_eq!(resolved.origin_id, "fallback");
-    }
+    assert_eq!(resolved.normalized_host, "unrelated.test");
+    assert_eq!(resolved.matched_host, "*");
+    assert_eq!(resolved.origin_id, "fallback");
+}
 
-
-    #[test]
-    fn specific_hosts_take_priority_over_global_wildcard() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn specific_hosts_take_priority_over_global_wildcard() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -149,38 +145,37 @@ hosts:
   "*":
     origin: fallback
 "#,
-        )
-        .expect("manifest parses");
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    )
+    .expect("manifest parses");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
 
-        assert_eq!(
-            resolver
-                .resolve("admin.example.com")
-                .expect("exact host resolves")
-                .origin_id,
-            "exact"
-        );
-        assert_eq!(
-            resolver
-                .resolve("shop.example.com")
-                .expect("domain wildcard resolves")
-                .origin_id,
-            "domain"
-        );
-        assert_eq!(
-            resolver
-                .resolve("unrelated.test")
-                .expect("global wildcard resolves")
-                .origin_id,
-            "fallback"
-        );
-    }
+    assert_eq!(
+        resolver
+            .resolve("admin.example.com")
+            .expect("exact host resolves")
+            .origin_id,
+        "exact"
+    );
+    assert_eq!(
+        resolver
+            .resolve("shop.example.com")
+            .expect("domain wildcard resolves")
+            .origin_id,
+        "domain"
+    );
+    assert_eq!(
+        resolver
+            .resolve("unrelated.test")
+            .expect("global wildcard resolves")
+            .origin_id,
+        "fallback"
+    );
+}
 
-
-    #[test]
-    fn global_wildcard_does_not_resolve_invalid_host() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn global_wildcard_does_not_resolve_invalid_host() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -193,20 +188,19 @@ hosts:
   "*":
     origin: fallback
 "#,
-        )
-        .expect("manifest parses");
-        let resolver = HostResolver::new(&manifest).expect("resolver builds");
+    )
+    .expect("manifest parses");
+    let resolver = HostResolver::new(&manifest).expect("resolver builds");
 
-        assert!(resolver.resolve("").is_none());
-        assert!(resolver.resolve("invalid host").is_none());
-        assert!(resolver.resolve("example.com:not-a-port").is_none());
-    }
+    assert!(resolver.resolve("").is_none());
+    assert!(resolver.resolve("invalid host").is_none());
+    assert!(resolver.resolve("example.com:not-a-port").is_none());
+}
 
-
-    #[test]
-    fn rejects_duplicate_normalized_global_wildcards() {
-        let manifest = parse_manifest_yaml(
-            r#"
+#[test]
+fn rejects_duplicate_normalized_global_wildcards() {
+    let manifest = parse_manifest_yaml(
+        r#"
 version: 1
 runtime:
   local_store_dir: ./var/rendermesh/origins
@@ -221,10 +215,10 @@ hosts:
   " * ":
     origin: fallback
 "#,
-        )
-        .expect("manifest parses");
+    )
+    .expect("manifest parses");
 
-        let error = HostResolver::new(&manifest).expect_err("duplicate wildcard is rejected");
+    let error = HostResolver::new(&manifest).expect_err("duplicate wildcard is rejected");
 
-        assert!(error.to_string().contains("duplicate global wildcard host"));
-    }
+    assert!(error.to_string().contains("duplicate global wildcard host"));
+}

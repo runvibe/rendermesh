@@ -1,12 +1,12 @@
 use super::*;
 
-    #[tokio::test]
-    async fn load_manifest_reads_json_file() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let path = temp.path().join("rendermesh.json");
-        tokio::fs::write(
-            &path,
-            r#"
+#[tokio::test]
+async fn load_manifest_reads_json_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let path = temp.path().join("rendermesh.json");
+    tokio::fs::write(
+        &path,
+        r#"
 {
   "version": 1,
   "runtime": {
@@ -30,18 +30,18 @@ use super::*;
   }
 }
 "#,
-        )
+    )
+    .await
+    .expect("write manifest");
+
+    let manifest = load_manifest(&ManifestRepository::new(), &path)
         .await
-        .expect("write manifest");
+        .expect("json manifest loads");
 
-        let manifest = load_manifest(&ManifestRepository::new(), &path)
-            .await
-            .expect("json manifest loads");
-
-        assert_eq!(manifest.runtime.sync_interval_seconds, 45);
-        match &manifest.origins["web"] {
-            OriginConfig::S3(origin) => assert_eq!(origin.bucket, "web-bucket"),
-            other => panic!("expected s3 origin, got {other:?}"),
-        }
-        assert_eq!(manifest.hosts["app.test"].origin, "web");
+    assert_eq!(manifest.runtime.sync_interval_seconds, 45);
+    match &manifest.origins["web"] {
+        OriginConfig::S3(origin) => assert_eq!(origin.bucket, "web-bucket"),
+        other => panic!("expected s3 origin, got {other:?}"),
     }
+    assert_eq!(manifest.hosts["app.test"].origin, "web");
+}

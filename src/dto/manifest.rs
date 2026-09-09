@@ -146,7 +146,7 @@ pub struct CloudFrontSaasCdnConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CloudFrontSaasCertificateConfig {
     Managed {
         #[serde(default)]

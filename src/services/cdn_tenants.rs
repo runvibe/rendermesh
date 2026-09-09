@@ -143,7 +143,10 @@ hosts:
         }));
         let service = OriginCdnTenants::new(repository.clone());
 
-        let outcome = service.reconcile(&manifest, "app").await.expect("reconciles");
+        let outcome = service
+            .reconcile(&manifest, "app")
+            .await
+            .expect("reconciles");
 
         assert_eq!(outcome.provider, "cloudfront_saas");
         assert_eq!(outcome.status, "submitted");

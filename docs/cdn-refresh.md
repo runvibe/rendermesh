@@ -119,6 +119,9 @@ Each tenant invalidation reuses the same activated path set, but has its own cal
 - `request_ids`: the complete ordered invalidation id list for every submitted tenant request.
 
 The runtime snapshot follows the same pattern with `last_cdn_request_id` and `last_cdn_request_ids`.
+If a later tenant invalidation fails, the response and runtime snapshot use
+`partial_failure` and retain the request ids and submitted item count from
+tenants completed before the failure; `last_cdn_error` records the failure.
 
 ### Managed certificates, DNS, and IAM
 

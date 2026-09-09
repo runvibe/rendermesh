@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use super::*;
 use crate::repositories::cdn::{
-    CdnPurge, CdnPurgeMode, CdnPurgeRequest, CdnTenantConfig, CdnTenantReconcile,
+    CdnPurge, CdnPurgeFailure, CdnPurgeMode, CdnPurgeRequest, CdnTenantConfig, CdnTenantReconcile,
     CdnTenantReconcileRequest, ManagedCertificateRequest,
 };
 
@@ -490,6 +490,42 @@ async fn invalidation_paginates_filters_sorts_and_submits_per_tenant() {
 }
 
 #[tokio::test]
+async fn invalidation_failure_reports_ids_from_completed_tenants() {
+    let client = FakeClient::default();
+    client.page(
+        None,
+        DistributionTenantPage {
+            tenants: vec![
+                tenant("tenant-a", "a.example.com"),
+                tenant("tenant-z", "b.example.com"),
+            ],
+            next_marker: None,
+        },
+    );
+    client.invalidation_id("tenant-a", "request-a");
+    client.invalidation_error("tenant-z", "service unavailable");
+    let repository = repository(client, config(), ["a.example.com", "b.example.com"]);
+
+    let error = repository
+        .purge(CdnPurgeRequest {
+            origin_id: "web".to_string(),
+            generation: 7,
+            mode: CdnPurgeMode::Paths(vec!["/a.css".to_string(), "/b.js".to_string()]),
+        })
+        .await
+        .expect_err("second tenant invalidation fails");
+
+    assert!(error.to_string().contains("request-a"));
+    assert!(error.to_string().contains("tenant-z"));
+    let failure = error
+        .downcast_ref::<CdnPurgeFailure>()
+        .expect("partial purge details");
+    assert_eq!(failure.provider, "cloudfront_saas");
+    assert_eq!(failure.request_ids, ["request-a"]);
+    assert_eq!(failure.submitted_items, 2);
+}
+
+#[tokio::test]
 async fn invalidation_includes_tenants_with_unknown_enabled_state() {
     let client = FakeClient::default();
     let mut existing = tenant("tenant-unknown", "app.example.com");
@@ -746,6 +782,7 @@ struct FakeState {
     certificates: BTreeMap<String, ManagedCertificateLookup>,
     pages: BTreeMap<Option<String>, DistributionTenantPage>,
     invalidation_ids: BTreeMap<String, String>,
+    invalidation_errors: BTreeMap<String, String>,
     operations: Vec<Operation>,
 }
 
@@ -790,6 +827,14 @@ impl FakeClient {
             .expect("fake lock")
             .invalidation_ids
             .insert(tenant_id.to_string(), invalidation_id.to_string());
+    }
+
+    fn invalidation_error(&self, tenant_id: &str, error: &str) {
+        self.state
+            .lock()
+            .expect("fake lock")
+            .invalidation_errors
+            .insert(tenant_id.to_string(), error.to_string());
     }
 
     fn operations(&self) -> Vec<Operation> {
@@ -907,6 +952,9 @@ impl CloudFrontSaasClient for FakeClient {
         state
             .operations
             .push(Operation::Invalidate(request.clone()));
+        if let Some(error) = state.invalidation_errors.get(&request.tenant_id) {
+            return Err(anyhow!(error.clone()));
+        }
         Ok(CloudFrontResponse {
             value: state
                 .invalidation_ids

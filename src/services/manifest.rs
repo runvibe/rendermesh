@@ -325,6 +325,5 @@ fn validate_origin_id(origin_id: &str) -> Result<()> {
     Ok(())
 }
 
-
 #[cfg(test)]
 mod tests;
