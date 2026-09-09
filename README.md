@@ -18,7 +18,7 @@ RenderMesh exists to provide that middle layer. The goal is to keep frontend art
 - Origin refresh keeps an in-memory freshness index and activates changed files only after edge config and template compilation succeed.
 - CDN refresh can purge CloudFront, CloudFront SaaS tenants, or Cloudflare after a new origin generation is activated.
 - CDN domain reconciliation can align CloudFront aliases or Cloudflare DNS records with RenderMesh hosts.
-- `cloudfront_saas` automatically reconciles one single-domain tenant per exact host, preserves existing AWS customizations, and owns the tenant `enabled` state, including re-enabling explicitly disabled matching tenants. After activation it submits one tenant-specific invalidation per matching enabled tenant, retaining completed request IDs in runtime state if a later invalidation fails.
+- `cloudfront_saas` automatically reconciles one single-domain tenant per exact host, preserves existing AWS customizations, and owns the tenant `enabled` state, including re-enabling explicitly disabled matching tenants. After activation it submits one tenant-specific invalidation per matching enabled tenant with restart-collision-safe caller references, retaining completed request IDs in runtime state if a later invalidation fails.
 - Startup shares one CloudFront SaaS repository between refresh and tenant reconciliation; reconciliation follows initial activation, so the first purge may report `skipped_no_tenants`.
 - Runtime debug endpoints expose per-origin generations, freshness counts, and last refresh errors.
 - Authorized operators can force an immediate per-origin sync without restarting the service.

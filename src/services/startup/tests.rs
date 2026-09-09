@@ -695,7 +695,7 @@ origins:
       api_base_env: TEST_CF_API_BASE
       strategy: changed_paths
 hosts:
-  web.test:
+  " WEB.TEST ":
     origin: web
 "#,
             mirror_dir.display()

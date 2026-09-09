@@ -12,6 +12,8 @@ use crate::repositories::cdn::{
     CdnTenantReconcileRequest, ManagedCertificateRequest,
 };
 
+mod final_review;
+
 #[test]
 fn tenant_names_are_stable_distribution_specific_and_bounded() {
     assert_eq!(
@@ -48,7 +50,11 @@ fn tenant_names_are_stable_distribution_specific_and_bounded() {
 async fn missing_domain_creates_one_enabled_tenant() {
     let client = FakeClient::default();
     client.lookup("app.example.com", None);
-    let repository = repository(client.clone(), config(), ["app.example.com"]);
+    let mut desired = config();
+    desired.managed_certificate = Some(ManagedCertificateRequest {
+        validation_token_host: "cloudfront".to_string(),
+    });
+    let repository = repository(client.clone(), desired, ["app.example.com"]);
 
     let result = repository
         .reconcile_tenants(reconcile_request(["app.example.com"]))
@@ -76,6 +82,12 @@ async fn missing_domain_creates_one_enabled_tenant() {
         BTreeSet::from(["app.example.com".to_string()])
     );
     assert_eq!(created.connection_group_id.as_deref(), Some("GROUP"));
+    assert_eq!(
+        created.managed_certificate,
+        Some(ManagedCertificateRequest {
+            validation_token_host: "cloudfront".to_string()
+        })
+    );
     assert!(created.enabled);
 }
 
@@ -464,8 +476,14 @@ async fn invalidation_paginates_filters_sorts_and_submits_per_tenant() {
     assert_eq!(result.status, "submitted");
     assert_eq!(result.request_ids, ["request-a", "request-z"]);
     assert_eq!(result.submitted_items, 4);
+    let mut operations = client.operations();
+    for operation in &mut operations {
+        if let Operation::Invalidate(request) = operation {
+            request.caller_reference.clear();
+        }
+    }
     assert_eq!(
-        client.operations(),
+        operations,
         vec![
             Operation::List {
                 distribution_id: "DIST".to_string(),
@@ -477,12 +495,12 @@ async fn invalidation_paginates_filters_sorts_and_submits_per_tenant() {
             },
             Operation::Invalidate(TenantInvalidationRequest {
                 tenant_id: "tenant-a".to_string(),
-                caller_reference: "rendermesh-web-7-tenant-a".to_string(),
+                caller_reference: String::new(),
                 paths: vec!["/a.css".to_string(), "/b.js".to_string()],
             }),
             Operation::Invalidate(TenantInvalidationRequest {
                 tenant_id: "tenant-z".to_string(),
-                caller_reference: "rendermesh-web-7-tenant-z".to_string(),
+                caller_reference: String::new(),
                 paths: vec!["/a.css".to_string(), "/b.js".to_string()],
             }),
         ]
@@ -608,23 +626,6 @@ fn customizations_round_trip_through_aws_models() {
     );
 }
 
-#[test]
-fn non_unicode_environment_errors_do_not_expose_values() {
-    use std::{env::VarError, ffi::OsString};
-
-    let error = environment_variable_error(
-        "APP_CLOUDFRONT_PARAMETER",
-        VarError::NotUnicode(OsString::from("sensitive-value")),
-    );
-    let rendered = format!("{error:#}");
-
-    assert_eq!(
-        rendered,
-        "environment variable APP_CLOUDFRONT_PARAMETER: NotUnicode"
-    );
-    assert!(!rendered.contains("sensitive-value"));
-}
-
 #[tokio::test]
 async fn no_matching_tenants_skips_invalidation() {
     let client = FakeClient::default();
@@ -695,18 +696,11 @@ async fn caller_references_are_tenant_specific_and_retry_stable() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        references,
-        [
-            "rendermesh-web-9-tenant-a",
-            "rendermesh-web-9-tenant-b",
-            "rendermesh-web-9-tenant-a",
-            "rendermesh-web-9-tenant-b",
-        ]
-    );
+    assert_eq!(references.len(), 4);
     assert_ne!(references[0], references[1]);
     assert_eq!(references[0], references[2]);
     assert_eq!(references[1], references[3]);
+    assert!(references.iter().all(|reference| reference.len() <= 128));
 }
 
 fn config() -> CdnTenantConfig {
@@ -781,6 +775,7 @@ struct FakeState {
     current: BTreeMap<String, VersionedDistributionTenant>,
     certificates: BTreeMap<String, ManagedCertificateLookup>,
     pages: BTreeMap<Option<String>, DistributionTenantPage>,
+    list_call_limit: Option<usize>,
     invalidation_ids: BTreeMap<String, String>,
     invalidation_errors: BTreeMap<String, String>,
     operations: Vec<Operation>,
@@ -827,6 +822,10 @@ impl FakeClient {
             .expect("fake lock")
             .invalidation_ids
             .insert(tenant_id.to_string(), invalidation_id.to_string());
+    }
+
+    fn limit_list_calls(&self, limit: usize) {
+        self.state.lock().expect("fake lock").list_call_limit = Some(limit);
     }
 
     fn invalidation_error(&self, tenant_id: &str, error: &str) {
@@ -902,6 +901,17 @@ impl CloudFrontSaasClient for FakeClient {
             distribution_id: distribution_id.to_string(),
             marker: marker.clone(),
         });
+        let list_calls = state
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, Operation::List { .. }))
+            .count();
+        if state
+            .list_call_limit
+            .is_some_and(|limit| list_calls > limit)
+        {
+            return Err(anyhow!("test list call limit exceeded"));
+        }
         Ok(state.pages.get(&marker).cloned().unwrap_or_default())
     }
 

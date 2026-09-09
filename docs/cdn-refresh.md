@@ -116,12 +116,22 @@ After each successful origin activation, RenderMesh:
 3. Filters to matching exact-host tenants that are not explicitly disabled.
 4. Submits one `CreateInvalidationForDistributionTenant` request per matching tenant.
 
-Each tenant invalidation reuses the same activated path set, but has its own caller reference and its own invalidation id. A single refresh therefore returns:
+Each tenant invalidation reuses the same activated path set, but has its own
+caller reference and its own invalidation id. Caller references are bounded
+hashes of a random repository process namespace, origin, generation, tenant,
+and ordered paths. Retries through the same repository are stable; a newly
+constructed repository uses a different namespace so an in-memory generation
+reset cannot collide with a request from a previous process.
+
+A single refresh therefore returns:
 
 - `request_id`: the first invalidation id, for compatibility with existing clients; and
 - `request_ids`: the complete ordered invalidation id list for every submitted tenant request.
 
-The runtime snapshot follows the same pattern with `last_cdn_request_id` and `last_cdn_request_ids`.
+`submitted_items` is the number of invalidation paths multiplied by the number
+of matching tenants. The runtime snapshot records the same value in
+`last_cdn_submitted_items` and follows the request-ID compatibility pattern
+with `last_cdn_request_id` and `last_cdn_request_ids`.
 If a later tenant invalidation fails, the sync response omits `cdn`, as it does
 for other post-activation CDN failures. The runtime snapshot uses
 `partial_failure`, retains the request ids and submitted item count from
@@ -135,6 +145,7 @@ CloudFront SaaS support does **not** create the multi-tenant distribution, the c
 - `certificate.mode: managed` is the only supported certificate mode.
 - `validation_token_host` currently supports only `cloudfront`.
 - When `certificate` is omitted, RenderMesh leaves tenant certificate behavior inherited from the multi-tenant distribution.
+- When the inspected managed certificate already matches, updates for other tenant drift do not resend a certificate request.
 - Before a CloudFront-managed certificate can become active, each exact host must already resolve to the configured connection group's routing endpoint according to CloudFront SaaS Manager requirements.
 
 CloudFront SaaS uses the AWS SDK default credential chain and requires these CloudFront IAM actions:
@@ -165,7 +176,8 @@ origins:
         - https://docs.example.com
 ```
 
-When `url_prefixes` is omitted, RenderMesh derives URL prefixes from exact host mappings:
+When `url_prefixes` is omitted, RenderMesh derives canonical, normalized URL
+prefixes from exact host mappings:
 
 ```yaml
 hosts:
@@ -185,7 +197,17 @@ GET /_rendermesh/origins/{origin_id}/snapshot
 GET /_rendermesh/origins/{origin_id}/freshness
 ```
 
-CDN fields include provider, status, request id, request ids, refresh timestamp, submitted item count, domain reconciliation counts, and last CDN errors.
+CDN fields include provider, status, request id, request ids, refresh timestamp,
+submitted item count, domain reconciliation counts, and last CDN errors.
+
+CloudFront SaaS tenant reconciliation is reported through the existing
+domain-evidence fields: `last_cdn_domain_provider`,
+`last_cdn_domain_status`, `last_cdn_domain_reconciled_at`,
+`last_cdn_domain_added`, `last_cdn_domain_updated`,
+`last_cdn_domain_removed`, `last_cdn_domain_unchanged`, and
+`last_cdn_domain_error`. For this provider those fields describe tenant
+creation, update, and unchanged counts; `last_cdn_domain_removed` remains `0`
+because RenderMesh does not delete tenants.
 
 ## Domain Reconciliation
 

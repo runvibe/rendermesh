@@ -9,6 +9,7 @@ use crate::{
         cdn_domains::OriginCdnDomains,
         cdn_refresh::OriginCdnRefresh,
         cdn_tenants::{exact_hosts_for_origin, OriginCdnTenants},
+        manifest::normalize_host,
         origin_runtime::OriginRuntimeStore,
     },
 };
@@ -63,7 +64,14 @@ async fn build_origin_cdns(
                     OriginCdnTenants::new(Arc::new(repository)),
                 );
             }
-            _ => {
+            CdnConfig::CloudFront(_) => {
+                let url_prefixes = exact_url_prefixes_for_origin(manifest, origin_id);
+                refresh_by_origin.insert(
+                    origin_id.clone(),
+                    OriginCdnRefresh::from_config(config, url_prefixes).await?,
+                );
+            }
+            CdnConfig::Cloudflare(_) => {
                 let url_prefixes = exact_url_prefixes_for_origin(manifest, origin_id);
                 refresh_by_origin.insert(
                     origin_id.clone(),
@@ -168,7 +176,7 @@ fn exact_url_prefixes_for_origin(manifest: &RenderMeshManifest, origin_id: &str)
         .hosts
         .iter()
         .filter(|(host, config)| config.origin == origin_id && !host.trim().starts_with('*'))
-        .map(|(host, _)| format!("https://{host}"))
+        .filter_map(|(host, _)| normalize_host(host).map(|host| format!("https://{host}")))
         .collect()
 }
 
@@ -201,7 +209,7 @@ origins:
       parameters_env:
         origin: APP_CLOUDFRONT_ORIGIN_DOMAIN
 hosts:
-  app.example.com:
+  " APP.EXAMPLE.COM ":
     origin: app
   "*.example.com":
     origin: app
@@ -271,7 +279,7 @@ origins:
     type: local
     path: ./app
 hosts:
-  app.example.com:
+  " APP.EXAMPLE.COM ":
     origin: app
   "*.example.com":
     origin: app
@@ -315,4 +323,6 @@ hosts:
             }
         }
     }
+
+    mod lifecycle_tests;
 }

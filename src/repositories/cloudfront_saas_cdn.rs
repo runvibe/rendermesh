@@ -6,6 +6,7 @@ use std::{
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use crate::{
     dto::manifest::{
@@ -37,6 +38,7 @@ pub struct CloudFrontSaasCdnRepository {
     client: Arc<dyn CloudFrontSaasClient>,
     config: CdnTenantConfig,
     exact_hosts: BTreeSet<String>,
+    caller_reference_namespace: Uuid,
 }
 
 impl CloudFrontSaasCdnRepository {
@@ -63,6 +65,7 @@ impl CloudFrontSaasCdnRepository {
             client,
             config,
             exact_hosts,
+            caller_reference_namespace: Uuid::new_v4(),
         }
     }
 
@@ -93,20 +96,25 @@ impl CloudFrontSaasCdnRepository {
         managed_certificate: Option<&ManagedCertificateLookup>,
     ) -> bool {
         let desired = self.merged_tenant(existing, domain);
-        let certificate_matches =
-            self.config.managed_certificate.as_ref().is_none_or(
-                |request| match managed_certificate {
-                    Some(ManagedCertificateLookup::Found {
-                        validation_token_host: Some(existing),
-                    }) => existing == &request.validation_token_host,
-                    Some(ManagedCertificateLookup::Found {
-                        validation_token_host: None,
-                    }) => true,
-                    Some(ManagedCertificateLookup::NotFound) | None => false,
-                },
-            );
+        existing == &desired && self.managed_certificate_matches(managed_certificate)
+    }
 
-        existing == &desired && certificate_matches
+    fn managed_certificate_matches(
+        &self,
+        managed_certificate: Option<&ManagedCertificateLookup>,
+    ) -> bool {
+        self.config
+            .managed_certificate
+            .as_ref()
+            .is_none_or(|request| match managed_certificate {
+                Some(ManagedCertificateLookup::Found {
+                    validation_token_host: Some(existing),
+                }) => existing == &request.validation_token_host,
+                Some(ManagedCertificateLookup::Found {
+                    validation_token_host: None,
+                }) => true,
+                Some(ManagedCertificateLookup::NotFound) | None => false,
+            })
     }
 
     fn verify_distribution(&self, tenant: &DistributionTenant, domain: &str) -> Result<()> {
@@ -231,13 +239,19 @@ impl CdnTenantReconcile for CloudFrontSaasCdnRepository {
             }
 
             let current_id = current.tenant.id.clone();
+            let managed_certificate =
+                if self.managed_certificate_matches(managed_certificate.as_ref()) {
+                    None
+                } else {
+                    self.config.managed_certificate.clone()
+                };
             let updated_tenant = self
                 .client
                 .update_distribution_tenant(UpdateDistributionTenantRequest {
                     id: current_id.clone(),
                     if_match: current.etag,
                     tenant: self.merged_tenant(&current.tenant, &domain),
-                    managed_certificate: self.config.managed_certificate.clone(),
+                    managed_certificate,
                 })
                 .await
                 .with_context(|| {
@@ -271,6 +285,7 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
     async fn purge(&self, request: CdnPurgeRequest) -> Result<CdnPurgeResult> {
         let paths = ensure_paths_mode(request.mode, "CloudFront SaaS")?;
         let mut marker = None;
+        let mut seen_markers = BTreeSet::new();
         let mut tenants = Vec::new();
 
         loop {
@@ -288,6 +303,12 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
             let Some(next_marker) = page.next_marker else {
                 break;
             };
+            if !seen_markers.insert(next_marker.clone()) {
+                return Err(anyhow!(
+                    "CloudFront SaaS tenant pagination for distribution {} returned a repeated marker",
+                    self.config.distribution_id
+                ));
+            }
             marker = Some(next_marker);
         }
 
@@ -313,9 +334,12 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
         let submitted_items = paths.len() * tenants.len();
         let mut request_ids = Vec::with_capacity(tenants.len());
         for tenant in tenants {
-            let caller_reference = format!(
-                "rendermesh-{}-{}-{}",
-                request.origin_id, request.generation, tenant.id
+            let caller_reference = invalidation_caller_reference(
+                &self.caller_reference_namespace,
+                &request.origin_id,
+                request.generation,
+                &tenant.id,
+                &paths,
             );
             let tenant_id = tenant.id;
             let invalidation = self
@@ -348,6 +372,31 @@ impl CdnPurge for CloudFrontSaasCdnRepository {
             submitted_items,
         })
     }
+}
+
+fn invalidation_caller_reference(
+    namespace: &Uuid,
+    origin_id: &str,
+    generation: u64,
+    tenant_id: &str,
+    paths: &[String],
+) -> String {
+    let mut digest = Sha256::new();
+    hash_component(&mut digest, namespace.as_bytes());
+    hash_component(&mut digest, origin_id.as_bytes());
+    digest.update(generation.to_be_bytes());
+    hash_component(&mut digest, tenant_id.as_bytes());
+    digest.update((paths.len() as u64).to_be_bytes());
+    for path in paths {
+        hash_component(&mut digest, path.as_bytes());
+    }
+    let digest = digest.finalize();
+    format!("rendermesh-{digest:x}")
+}
+
+fn hash_component(digest: &mut Sha256, value: &[u8]) {
+    digest.update((value.len() as u64).to_be_bytes());
+    digest.update(value);
 }
 
 pub fn deterministic_tenant_name(distribution_id: &str, host: &str) -> String {
@@ -409,7 +458,13 @@ fn resolve_tenant_config(config: &CloudFrontSaasCdnConfig) -> Result<CdnTenantCo
 }
 
 fn read_environment_variable(name: &str) -> Result<String> {
-    std::env::var(name).map_err(|error| environment_variable_error(name, error))
+    let value = std::env::var(name).map_err(|error| environment_variable_error(name, error))?;
+    if value.trim().is_empty() {
+        return Err(anyhow!(
+            "environment variable {name} resolved to an empty value"
+        ));
+    }
+    Ok(value)
 }
 
 fn environment_variable_error(name: &str, error: std::env::VarError) -> anyhow::Error {

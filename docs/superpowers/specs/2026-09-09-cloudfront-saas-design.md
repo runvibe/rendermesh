@@ -173,7 +173,9 @@ For each origin using `cloudfront_saas`:
    configured, inspect its validation host with
    `GetManagedCertificateDetails`.
 6. If fields differ, update it with `UpdateDistributionTenant` and the ETag
-   returned by `GetDistributionTenant`.
+   returned by `GetDistributionTenant`. Attach `ManagedCertificateRequest`
+   only when certificate inspection found no matching managed certificate;
+   unrelated field drift does not resend it.
 7. Leave an already matching tenant unchanged.
 8. Record aggregate `added`, `updated`, and `unchanged` counts. `removed` is
    always zero in the first release.
@@ -196,9 +198,17 @@ After every successful origin generation activation:
    whose `enabled` state is not explicitly `false`.
 4. Submit one `CreateInvalidationForDistributionTenant` request per selected
    tenant.
-5. Use the existing deterministic caller reference per generation, extended
-   with the tenant ID so retries remain idempotent.
+5. Hash a repository-scoped random process namespace together with the origin
+   ID, generation, tenant ID, and ordered invalidation paths into a bounded
+   caller reference.
 6. Return all submitted AWS request IDs.
+
+The namespace is generated once when the repository is constructed and is
+shared by its clones. Identical retries through that repository therefore
+reuse a caller reference, while independently constructed repositories use
+different references even if an in-memory generation number restarts at the
+same value. Including the paths also prevents two requests for the same
+origin, generation, and tenant from colliding when their path sets differ.
 
 When no matching tenant exists, the refresh returns a successful
 `skipped_no_tenants` outcome with zero submitted items. This is expected during
@@ -208,7 +218,9 @@ tenant means there is no tenant cache or viewer traffic to invalidate.
 Invalidation failures are reported after activation and do not roll back the
 origin generation. A failure identifying one tenant stops further submissions
 for that refresh. Already submitted invalidations remain valid and the next
-origin refresh can retry with a new generation caller reference.
+origin refresh can retry with a caller reference for its new generation and
+path set. A repeated or non-advancing tenant-list pagination marker is rejected
+with context instead of being followed indefinitely.
 
 ## Result contract and observability
 
@@ -224,6 +236,14 @@ To preserve the existing HTTP response contract:
 
 The origin runtime debug snapshot follows the same compatibility rule with
 `last_cdn_request_id` and a new `last_cdn_request_ids` field.
+`submitted_items` and `last_cdn_submitted_items` equal the number of
+invalidation paths multiplied by the number of tenants submitted.
+
+Tenant reconciliation uses the existing domain-evidence fields:
+`last_cdn_domain_provider`, `last_cdn_domain_status`,
+`last_cdn_domain_reconciled_at`, `last_cdn_domain_added`,
+`last_cdn_domain_updated`, `last_cdn_domain_removed`,
+`last_cdn_domain_unchanged`, and `last_cdn_domain_error`.
 
 If a later tenant invalidation fails after earlier submissions succeeded, the
 sync response omits `cdn`, preserving the existing post-activation failure
@@ -297,7 +317,9 @@ startup/route -> dto -> service -> repository -> AWS SDK
 ## Error behavior
 
 - Missing or empty required environment variables fail startup before AWS
-  calls.
+  calls. This includes whitespace-only distribution IDs, configured connection
+  group IDs, and configured parameter values. Errors identify the manifest
+  field and environment key without including the resolved value.
 - Missing optional connection group configuration delegates selection to
   CloudFront.
 - An exact host assigned to more than one origin remains a manifest error under
@@ -375,7 +397,11 @@ implementation:
 - list and invalidate matching enabled tenants in deterministic order;
 - skip successfully when no tenants match;
 - include tenant context in AWS errors; and
-- generate distinct idempotent caller references per tenant and generation.
+- keep caller references stable within one repository, vary them by path set,
+  and separate independently constructed repository namespaces;
+- reject repeated tenant-list pagination markers; and
+- omit a managed-certificate request from unrelated tenant updates when the
+  inspected certificate already matches.
 
 ### Integration tests
 

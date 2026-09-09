@@ -397,8 +397,9 @@ Fake-client operation logs must prove:
 - invalidation lists all pages, selects enabled exact-domain tenants, sorts by
   tenant ID, and submits once per tenant;
 - no matching tenants returns `skipped_no_tenants`;
-- caller references differ by tenant but are stable for identical
-  origin/generation/tenant inputs.
+- caller references differ by tenant and path set, remain stable for identical
+  calls through one repository, and differ between independently constructed
+  repository namespaces.
 
 - [ ] **Step 2: Run repository tests and confirm the module is missing**
 
@@ -437,6 +438,8 @@ For each desired domain in sorted order:
 5. Compare domain, connection group, enabled state, parameters, and managed
    certificate validation host.
 6. Fetch the current ETag and call `update_distribution_tenant` only on drift.
+   Include the managed-certificate request only when inspection reports a
+   missing or mismatched certificate.
 7. Accumulate `added`, `updated`, and `unchanged`; always return `removed: 0`.
 
 - [ ] **Step 5: Implement tenant invalidation**
@@ -446,16 +449,11 @@ distribution association filter, select enabled tenants matching the
 repository's exact-host set, sort by tenant ID, and call
 `create_invalidation_for_distribution_tenant`.
 
-Use:
-
-```rust
-let caller_reference = format!(
-    "rendermesh-{}-{}-{}",
-    request.origin_id,
-    request.generation,
-    tenant.id
-);
-```
+Generate a random namespace once per repository construction. Hash that
+namespace with `origin_id`, `generation`, tenant ID, and the ordered paths, and
+prefix the hexadecimal digest with `rendermesh-`. Repository clones retain the
+same namespace, while a restarted process constructs a new namespace. Keep the
+result within the AWS caller-reference limit.
 
 Return `submitted_items = paths.len() * matching_tenant_count` and all
 invalidation IDs.
