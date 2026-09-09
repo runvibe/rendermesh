@@ -1,6 +1,7 @@
 pub mod cdn;
 pub mod cloudflare_cdn;
 pub mod cloudfront_cdn;
+pub mod cloudfront_saas_cdn;
 pub mod edge_http;
 pub mod local_directory_storage;
 pub mod local_mirror;

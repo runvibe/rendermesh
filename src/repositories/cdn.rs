@@ -5,6 +5,7 @@ use async_trait::async_trait;
 
 use crate::repositories::{
     cloudflare_cdn::CloudflareCdnRepository, cloudfront_cdn::CloudFrontCdnRepository,
+    cloudfront_saas_cdn::CloudFrontSaasCdnRepository,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,6 +93,7 @@ pub trait CdnTenantReconcile: Send + Sync {
 #[derive(Clone)]
 pub enum CdnPurgeRepository {
     CloudFront(CloudFrontCdnRepository),
+    CloudFrontSaas(CloudFrontSaasCdnRepository),
     Cloudflare(CloudflareCdnRepository),
 }
 
@@ -100,6 +102,7 @@ impl CdnPurge for CdnPurgeRepository {
     async fn purge(&self, request: CdnPurgeRequest) -> Result<CdnPurgeResult> {
         match self {
             Self::CloudFront(repository) => repository.purge(request).await,
+            Self::CloudFrontSaas(repository) => repository.purge(request).await,
             Self::Cloudflare(repository) => repository.purge(request).await,
         }
     }
@@ -113,6 +116,9 @@ impl CdnDomainReconcile for CdnPurgeRepository {
     ) -> Result<CdnDomainReconcileResult> {
         match self {
             Self::CloudFront(repository) => repository.reconcile_domains(request).await,
+            Self::CloudFrontSaas(_) => Err(anyhow!(
+                "CloudFront SaaS does not support distribution domain reconciliation"
+            )),
             Self::Cloudflare(repository) => repository.reconcile_domains(request).await,
         }
     }
