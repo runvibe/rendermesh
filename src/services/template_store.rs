@@ -11,7 +11,9 @@ use thiserror::Error;
 
 use crate::{
     repositories::local_mirror::{normalize_object_path, LocalMirrorRepository, METADATA_DIR_NAME},
-    services::{edge_hooks::is_html, freshness::OriginFreshnessDiff},
+    services::{
+        date_helpers::register_date_helpers, edge_hooks::is_html, freshness::OriginFreshnessDiff,
+    },
 };
 
 #[derive(Clone, Debug, Default)]
@@ -64,7 +66,7 @@ impl TemplateStore {
             .expect("template store lock")
             .get(origin_id)
             .map(|registry| (**registry).clone())
-            .unwrap_or_else(Handlebars::new);
+            .unwrap_or_else(new_template_registry);
 
         for key in &diff.removed {
             registry.unregister_template(key);
@@ -121,7 +123,7 @@ async fn load_origin_registry(
     mirror: &LocalMirrorRepository,
 ) -> Result<Handlebars<'static>> {
     let origin_dir = mirror.origin_dir(origin_id)?;
-    let mut registry = Handlebars::new();
+    let mut registry = new_template_registry();
     let files = mirror_files(&origin_dir).await?;
 
     for key in files {
@@ -140,6 +142,12 @@ async fn load_origin_registry(
     }
 
     Ok(registry)
+}
+
+fn new_template_registry() -> Handlebars<'static> {
+    let mut registry = Handlebars::new();
+    register_date_helpers(&mut registry);
+    registry
 }
 
 async fn mirror_files(origin_dir: &Path) -> Result<Vec<String>> {
@@ -335,6 +343,403 @@ mod tests {
             store.render("web", "/old.html", &json!({"title":"Gone"})),
             Err(TemplateStoreError::NotHtml)
         ));
+    }
+
+    #[tokio::test]
+    async fn date_format_normalizes_offsets_and_unix_seconds_to_utc() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let template = concat!(
+            "{{date_format east \"%Y-%m-%d %H:%M:%S\"}}|",
+            "{{date_format west \"%Y-%m-%d %H:%M:%S\"}}|",
+            "{{date_format epoch \"%Y-%m-%d %H:%M:%S\"}}|",
+            "{{date_format before_epoch \"%Y-%m-%d %H:%M:%S\"}}|",
+            "{{date_format fractional \"%Y-%m-%d %H:%M:%S%.3f\"}}"
+        );
+        write_object(temp.path(), "index.html", template, None).await;
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        let rendered = store
+            .render(
+                "web",
+                "/index.html",
+                &json!({
+                    "east": "2024-01-01T00:30:45+02:00",
+                    "west": "2019-10-31T23:59:59-05:00",
+                    "epoch": 0,
+                    "before_epoch": -1,
+                    "fractional": "2024-01-02T03:04:05.678+01:00"
+                }),
+            )
+            .expect("date helpers render");
+
+        assert_eq!(
+            rendered,
+            "2023-12-31 22:30:45|2019-11-01 04:59:59|1970-01-01 00:00:00|1969-12-31 23:59:59|2024-01-02 02:04:05.678"
+        );
+    }
+
+    #[tokio::test]
+    async fn date_format_respects_html_escaping_and_explicit_field_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(
+            temp.path(),
+            "index.html",
+            concat!(
+                "{{this.date_format}}|",
+                "{{date_format instant \"<%Y>\"}}|",
+                "{{{date_format instant \"<%Y>\"}}}"
+            ),
+            None,
+        )
+        .await;
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        let rendered = store
+            .render(
+                "web",
+                "/index.html",
+                &json!({"date_format": "from params", "instant": 0}),
+            )
+            .expect("template renders");
+
+        assert_eq!(rendered, "from params|&lt;1970&gt;|<1970>");
+    }
+
+    #[tokio::test]
+    async fn date_format_rejects_invalid_arguments_and_patterns() {
+        let cases = [
+            ("missing arguments", "{{date_format}}", json!({})),
+            (
+                "missing format",
+                "{{date_format input}}",
+                json!({"input": 0}),
+            ),
+            (
+                "extra argument",
+                "{{date_format input \"%F\" \"extra\"}}",
+                json!({"input": 0}),
+            ),
+            (
+                "named argument",
+                "{{date_format input \"%F\" extra=true}}",
+                json!({"input": 0}),
+            ),
+            (
+                "invalid date",
+                "{{date_format input \"%F\"}}",
+                json!({"input": "not a date"}),
+            ),
+            (
+                "date without timezone",
+                "{{date_format input \"%F\"}}",
+                json!({"input": "2026-11-10T12:00:00"}),
+            ),
+            (
+                "nonexistent date",
+                "{{date_format input \"%F\"}}",
+                json!({"input": "2024-02-30T00:00:00Z"}),
+            ),
+            (
+                "timestamp as string",
+                "{{date_format input \"%F\"}}",
+                json!({"input": "0"}),
+            ),
+            (
+                "out-of-range timestamp",
+                "{{date_format input \"%F\"}}",
+                json!({"input": i64::MAX}),
+            ),
+            (
+                "fractional timestamp",
+                "{{date_format input \"%F\"}}",
+                json!({"input": 1.5}),
+            ),
+            (
+                "null timestamp",
+                "{{date_format input \"%F\"}}",
+                json!({"input": null}),
+            ),
+            (
+                "non-string format",
+                "{{date_format input format}}",
+                json!({"input": 0, "format": 12}),
+            ),
+            (
+                "unknown format specifier",
+                "{{date_format input \"%Q\"}}",
+                json!({"input": 0}),
+            ),
+            (
+                "incomplete format specifier",
+                "{{date_format input \"%\"}}",
+                json!({"input": 0}),
+            ),
+            (
+                "parsing-only format specifier",
+                "{{date_format input \"%#z\"}}",
+                json!({"input": 0}),
+            ),
+        ];
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (index, (_, template, _)) in cases.iter().enumerate() {
+            write_object(temp.path(), &format!("case-{index}.html"), template, None).await;
+        }
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        for (index, (case, _, params)) in cases.iter().enumerate() {
+            let error = store
+                .render("web", &format!("/case-{index}.html"), params)
+                .expect_err(case);
+            match error {
+                TemplateStoreError::Render(error) => {
+                    assert!(
+                        !matches!(
+                            error.reason(),
+                            handlebars::RenderErrorReason::HelperNotFound(_)
+                        ),
+                        "{case}: helper must reject the input rather than be missing"
+                    );
+                }
+                other => panic!("{case}: expected a render error, got {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn date_format_survives_incremental_updates_and_origin_reload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(
+            temp.path(),
+            "index.html",
+            "<p>{{date_format instant \"%F\"}}</p>",
+            None,
+        )
+        .await;
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        let store = TemplateStore::default();
+        let added = OriginFreshnessDiff {
+            added: ["index.html".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        let registry = store
+            .compile_template_update("web", &mirror, &added)
+            .await
+            .expect("compile first update");
+        store.set_origin_registry("web", registry);
+        assert_eq!(
+            store
+                .render("web", "/index.html", &json!({"instant": 0}))
+                .expect("initial update renders"),
+            "<p>1970-01-01</p>"
+        );
+
+        write_object(
+            temp.path(),
+            "index.html",
+            "<strong>{{date_format instant \"%F\"}}</strong>",
+            None,
+        )
+        .await;
+        let modified = OriginFreshnessDiff {
+            modified: ["index.html".to_string()].into_iter().collect(),
+            ..Default::default()
+        };
+        let registry = store
+            .compile_template_update("web", &mirror, &modified)
+            .await
+            .expect("compile subsequent update");
+        assert_eq!(
+            store
+                .render("web", "/index.html", &json!({"instant": 0}))
+                .expect("old registry remains active"),
+            "<p>1970-01-01</p>"
+        );
+        store.set_origin_registry("web", registry);
+        assert_eq!(
+            store
+                .render("web", "/index.html", &json!({"instant": 0}))
+                .expect("updated registry renders"),
+            "<strong>1970-01-01</strong>"
+        );
+
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("reload origin");
+        assert_eq!(
+            store
+                .render("web", "/index.html", &json!({"instant": 0}))
+                .expect("reloaded registry renders"),
+            "<strong>1970-01-01</strong>"
+        );
+    }
+
+    #[tokio::test]
+    async fn date_current_helpers_render_current_utc_values() {
+        use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(
+            temp.path(),
+            "index.html",
+            "{{date_now}}|{{date_today}}|{{date_time}}|{{date_timestamp}}",
+            None,
+        )
+        .await;
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        let before = Utc::now();
+        let rendered = store
+            .render("web", "/index.html", &json!({}))
+            .expect("current helpers render");
+        let after = Utc::now();
+        let parts = rendered.split('|').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4);
+
+        let now = DateTime::parse_from_rfc3339(parts[0]).expect("RFC 3339 date");
+        assert_eq!(parts[0].len(), 20);
+        assert!(parts[0].ends_with('Z'));
+        assert_eq!(now.offset().local_minus_utc(), 0);
+        assert!((before.timestamp()..=after.timestamp()).contains(&now.timestamp()));
+
+        let today = NaiveDate::parse_from_str(parts[1], "%Y-%m-%d").expect("date");
+        assert!(today >= before.date_naive() && today <= after.date_naive());
+        let time = NaiveTime::parse_from_str(parts[2], "%H:%M:%S").expect("time");
+        assert_eq!(parts[2].len(), 8);
+        let start_day_time = before.date_naive().and_time(time).and_utc().timestamp();
+        let end_day_time = after.date_naive().and_time(time).and_utc().timestamp();
+        let window = before.timestamp()..=after.timestamp();
+        assert!(
+            window.contains(&start_day_time)
+                || window.contains(&end_day_time)
+                || after.timestamp() - before.timestamp() >= 86_400
+        );
+
+        let timestamp = parts[3].parse::<i64>().expect("Unix timestamp");
+        assert!(window.contains(&timestamp));
+    }
+
+    #[tokio::test]
+    async fn date_current_helpers_work_as_date_format_subexpressions() {
+        use chrono::{NaiveDate, Utc};
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(
+            temp.path(),
+            "index.html",
+            concat!(
+                "{{date_format (date_now) \"%F\"}}|",
+                "{{date_format (date_timestamp) \"%F\"}}"
+            ),
+            None,
+        )
+        .await;
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        let before = Utc::now().date_naive();
+        let rendered = store
+            .render("web", "/index.html", &json!({}))
+            .expect("subexpressions render");
+        let after = Utc::now().date_naive();
+        let dates = rendered.split('|').collect::<Vec<_>>();
+        assert_eq!(dates.len(), 2);
+        for date in dates {
+            let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").expect("formatted date");
+            assert!(date >= before && date <= after);
+        }
+    }
+
+    #[tokio::test]
+    async fn date_current_helpers_reject_arguments_and_blocks() {
+        let cases = [
+            "{{date_now 1}}",
+            "{{date_today 1}}",
+            "{{date_time 1}}",
+            "{{date_timestamp 1}}",
+            "{{date_now extra=true}}",
+            "{{date_today extra=true}}",
+            "{{date_time extra=true}}",
+            "{{date_timestamp extra=true}}",
+            "{{#date_now}}ignored{{/date_now}}",
+        ];
+        let temp = tempfile::tempdir().expect("tempdir");
+        for (index, template) in cases.iter().enumerate() {
+            write_object(temp.path(), &format!("case-{index}.html"), template, None).await;
+        }
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        for (index, template) in cases.iter().enumerate() {
+            let error = store
+                .render("web", &format!("/case-{index}.html"), &json!({}))
+                .expect_err(template);
+            match error {
+                TemplateStoreError::Render(error) => {
+                    assert!(
+                        !matches!(
+                            error.reason(),
+                            handlebars::RenderErrorReason::HelperNotFound(_)
+                        ),
+                        "{template}: helper must reject the input rather than be missing"
+                    );
+                }
+                other => panic!("{template}: expected a render error, got {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn date_current_helper_allows_explicit_access_to_same_named_param() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_object(
+            temp.path(),
+            "index.html",
+            "{{this.date_now}}|{{date_now}}",
+            None,
+        )
+        .await;
+        let store = TemplateStore::default();
+        let mirror = LocalMirrorRepository::new(temp.path().join("origins"));
+        store
+            .load_origin_templates("web", &mirror)
+            .await
+            .expect("templates load");
+
+        let rendered = store
+            .render("web", "/index.html", &json!({"date_now": "from params"}))
+            .expect("template renders");
+        let (param, now) = rendered.split_once('|').expect("two values");
+        assert_eq!(param, "from params");
+        assert!(chrono::DateTime::parse_from_rfc3339(now).is_ok());
     }
 
     async fn write_object(

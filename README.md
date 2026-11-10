@@ -273,6 +273,21 @@ When an origin defines edge hooks, RenderMesh sends a `POST` request to the conf
 
 The edge response status code becomes the client status for terminal edge responses. The edge response payload can return direct bodies, response headers, params for HTML template rendering, or a specific file path to serve from the origin mirror. See [Edge Hooks](docs/edge-hooks.md).
 
+## Template Date Helpers
+
+HTML templates can use `date_now`, `date_today`, `date_time`, `date_timestamp`,
+and `date_format`. All use UTC. For example:
+
+```handlebars
+<p>Now: {{date_now}}</p>
+<p>Published: {{date_format published_at "%d/%m/%Y %H:%M"}}</p>
+<p>Today: {{date_format (date_timestamp) "%Y-%m-%d"}}</p>
+```
+
+`date_format` accepts an RFC 3339 string or an integer Unix timestamp in
+seconds. HTML is rendered only when an edge hook returns `params`; see
+[Templates](docs/templates.md#date-helpers) for formats and error behavior.
+
 ## Testing
 
 Run the full suite:
