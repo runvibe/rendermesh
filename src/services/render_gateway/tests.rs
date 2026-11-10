@@ -11,6 +11,8 @@ use wiremock::{
     Mock, MockServer, ResponseTemplate,
 };
 
+mod date_helpers;
+
 #[tokio::test]
 async fn serves_get_from_local_mirror() {
     let temp = tempfile::tempdir().expect("tempdir");
